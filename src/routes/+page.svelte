@@ -122,59 +122,88 @@
     <p class="text-muted">Go to <a href="/settings">Settings</a> to enable repos for cloning and running.</p>
   </div>
 {:else}
-  <div class="repo-grid">
-    {#each $enabledRepos as repo}
-      {@const run = $latestRuns.get(repo.id)}
-      {@const trend = $trends.get(repo.id) ?? []}
-      {@const running = $runningRepos.has(repo.id)}
-      <div class="repo-card card">
-        <div class="card-top">
-          <div class="repo-meta">
+  <table class="repo-table">
+    <thead>
+      <tr>
+        <th>Repo</th>
+        <th>Ruby</th>
+        <th class="col-cov">Coverage</th>
+        <th class="col-trend">Trend</th>
+        <th class="col-status">Status</th>
+        <th class="col-actions"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {#each $enabledRepos as repo}
+        {@const run = $latestRuns.get(repo.id)}
+        {@const trend = $trends.get(repo.id) ?? []}
+        {@const running = $runningRepos.has(repo.id)}
+        <tr>
+          <td>
             <button class="repo-name" onclick={() => goto(`/repo/${repo.id}`)}>{repo.name}</button>
-            {#if repo.ruby_version}
-              <span class="ruby-tag text-muted mono">ruby {repo.ruby_version}</span>
+          </td>
+          <td class="text-muted mono" style="font-size:0.75rem">{repo.ruby_version ?? '—'}</td>
+          <td class="col-cov"><CoverageBadge pct={run?.overall_coverage} /></td>
+          <td class="col-trend"><TrendSparkline points={trend} width={80} height={24} /></td>
+          <td class="col-status">
+            {#if run?.status === 'failed'}
+              <span class="badge badge-red">failed</span>
+            {:else if running}
+              <span class="badge badge-yellow">running…</span>
+            {:else if run?.status === 'success'}
+              <span class="badge badge-green">ok</span>
             {/if}
-          </div>
-          <CoverageBadge pct={run?.overall_coverage} />
-        </div>
-
-        <div class="card-mid">
-          <TrendSparkline points={trend} width={90} height={30} />
-          {#if run?.status === 'failed'}
-            <span class="badge badge-red" style="font-size:0.6875rem">failed</span>
-          {:else if running}
-            <span class="badge badge-yellow" style="font-size:0.6875rem">running…</span>
-          {/if}
-        </div>
-
-        <div class="card-actions">
-          <button class="btn-ghost" onclick={() => cloneOrPullRepo(repo.id)} disabled={running}>Pull</button>
-          <button class="btn-primary" onclick={() => runRepo(repo.id)} disabled={running || !repo.local_path}>
-            {running ? 'Running…' : 'Run'}
-          </button>
-          <button class="btn-ghost" onclick={() => doExport(repo.id)} disabled={exporting}>CSV</button>
-        </div>
-      </div>
-    {/each}
-  </div>
+          </td>
+          <td class="col-actions">
+            <button class="btn-ghost" onclick={() => cloneOrPullRepo(repo.id)} disabled={running}>Pull</button>
+            <button class="btn-primary" onclick={() => runRepo(repo.id)} disabled={running || !repo.local_path}>
+              {running ? 'Running…' : 'Run'}
+            </button>
+            <button class="btn-ghost" onclick={() => doExport(repo.id)} disabled={exporting}>CSV</button>
+          </td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
 {/if}
 
 <style>
   .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
   .header-actions { display: flex; gap: 0.5rem; }
   .empty { padding: 3rem 1rem; text-align: center; }
-  .repo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.875rem; }
-  .repo-card { padding: 0.875rem; display: flex; flex-direction: column; gap: 0.5rem; }
-  .card-top { display: flex; justify-content: space-between; align-items: flex-start; }
-  .repo-meta { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
+
+  .repo-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+  .repo-table th {
+    text-align: left;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0 0.75rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .repo-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: middle;
+  }
+  .repo-table tbody tr:last-child td { border-bottom: none; }
+  .repo-table tbody tr:hover td { background: #f7f8fa; }
+
   .repo-name {
     background: none; border: none; padding: 0;
-    font-size: 0.875rem; font-weight: 600; color: var(--accent);
+    font-size: 0.875rem; font-weight: 500; color: var(--accent);
     cursor: pointer; text-align: left;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .repo-name:hover { text-decoration: underline; }
-  .ruby-tag { font-size: 0.6875rem; }
-  .card-mid { display: flex; align-items: center; gap: 0.5rem; min-height: 32px; }
-  .card-actions { display: flex; gap: 0.375rem; justify-content: flex-end; margin-top: 0.25rem; }
+
+  .col-cov   { width: 90px; }
+  .col-trend { width: 100px; }
+  .col-status { width: 72px; }
+  .col-actions { width: 1px; white-space: nowrap; text-align: right; }
+  .col-actions button + button { margin-left: 0.25rem; }
 </style>
