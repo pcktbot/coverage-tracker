@@ -10,6 +10,7 @@ pub struct GithubClient {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct GhRepo {
     pub name: String,
     pub html_url: String,
@@ -98,7 +99,6 @@ impl GithubClient {
 }
 
 fn general_purpose_decode(b64: &str) -> Result<String> {
-    use std::io::Read;
     // GitHub adds newlines to base64 — strip them
     let clean: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = base64_decode(&clean)?;

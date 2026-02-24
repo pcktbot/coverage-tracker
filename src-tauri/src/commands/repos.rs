@@ -1,7 +1,7 @@
-use crate::db::{self, repos as db_repos};
+use crate::db::repos as db_repos;
 use crate::github::GithubClient;
 use crate::git as git_ops;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 use tauri::State;
 
