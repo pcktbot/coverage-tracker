@@ -51,11 +51,10 @@ impl GithubClient {
         Ok(resp.json()?)
     }
 
-    /// List all non-archived repos in an org that have `simplecov` in their Gemfile.
-    pub fn list_simplecov_repos(&self, org: &str) -> Result<Vec<GhRepo>> {
+    /// List all non-archived, non-fork repos in an org (fast — no Gemfile checks).
+    pub fn list_all_repos(&self, org: &str) -> Result<Vec<GhRepo>> {
         let mut repos: Vec<GhRepo> = Vec::new();
         let mut page = 1u32;
-
         loop {
             let url = format!(
                 "{}/orgs/{}/repos?type=all&per_page=100&page={}",
@@ -66,16 +65,24 @@ impl GithubClient {
                 break;
             }
             for repo in batch {
-                if repo.archived || repo.fork {
-                    continue;
-                }
-                if self.has_simplecov(org, &repo.name).unwrap_or(false) {
+                if !repo.archived && !repo.fork {
                     repos.push(repo);
                 }
             }
             page += 1;
         }
         Ok(repos)
+    }
+
+    /// List repos that contain `simplecov` in their Gemfile.
+    /// This is slow (one HTTP request per repo) — prefer `list_all_repos` for syncing.
+    pub fn list_simplecov_repos(&self, org: &str) -> Result<Vec<GhRepo>> {
+        self.list_all_repos(org).map(|repos| {
+            repos
+                .into_iter()
+                .filter(|r| self.has_simplecov(org, &r.name).unwrap_or(false))
+                .collect()
+        })
     }
 
     fn has_simplecov(&self, org: &str, repo: &str) -> Result<bool> {

@@ -6,7 +6,6 @@
   import CoverageBadge from '$lib/components/CoverageBadge.svelte';
   import TrendSparkline from '$lib/components/TrendSparkline.svelte';
   import {
-    syncOrgRepos,
     cloneOrPullRepo,
     runCoverage,
     listRuns,
@@ -16,7 +15,6 @@
   } from '$lib/api';
 
   let error = $state('');
-  let syncing = $state(false);
   let cloningAll = $state(false);
   let runningAll = $state(false);
   let exporting = $state(false);
@@ -36,21 +34,6 @@
         const trend = await getTrend(repo.id, 10);
         trends.update((m) => { m.set(repo.id, trend); return new Map(m); });
       } catch { /* non-fatal */ }
-    }
-  }
-
-  async function syncRepos() {
-    if (!$activeOrg) return;
-    syncing = true;
-    error = '';
-    try {
-      await syncOrgRepos($activeOrg);
-      await refreshRepos($activeOrg);
-      await loadRunData();
-    } catch (e: any) {
-      error = e.message;
-    } finally {
-      syncing = false;
     }
   }
 
@@ -112,13 +95,10 @@
 <div class="page-header">
   <h1>{$activeOrg ?? 'Coverage'}</h1>
   <div class="header-actions">
-    <button class="btn-secondary" onclick={syncRepos} disabled={syncing || !$activeOrg}>
-      {syncing ? 'Syncing…' : 'Sync repos'}
-    </button>
-    <button class="btn-secondary" onclick={cloneAll} disabled={cloningAll}>
+    <button class="btn-secondary" onclick={cloneAll} disabled={cloningAll || $enabledRepos.length === 0}>
       {cloningAll ? 'Cloning…' : 'Clone / pull all'}
     </button>
-    <button class="btn-primary" onclick={runAll} disabled={runningAll}>
+    <button class="btn-primary" onclick={runAll} disabled={runningAll || $enabledRepos.length === 0}>
       {runningAll ? 'Running…' : 'Run all'}
     </button>
     <button class="btn-secondary" onclick={() => doExport()} disabled={exporting}>
@@ -133,16 +113,21 @@
 
 {#if $repos.length === 0}
   <div class="empty">
-    <p class="text-secondary">No repos found for <strong>{$activeOrg}</strong>.</p>
-    <p class="text-muted">Click <em>Sync repos</em> to fetch from GitHub, or configure a token in Settings.</p>
+    <p class="text-secondary">No repos synced for <strong>{$activeOrg}</strong>.</p>
+    <p class="text-muted">Go to <a href="/settings">Settings</a> → <em>Sync from GitHub</em> to fetch the repo list, then enable the ones you want to track.</p>
+  </div>
+{:else if $enabledRepos.length === 0}
+  <div class="empty">
+    <p class="text-secondary">All repos are disabled.</p>
+    <p class="text-muted">Go to <a href="/settings">Settings</a> to enable repos for cloning and running.</p>
   </div>
 {:else}
   <div class="repo-grid">
-    {#each $repos as repo}
+    {#each $enabledRepos as repo}
       {@const run = $latestRuns.get(repo.id)}
       {@const trend = $trends.get(repo.id) ?? []}
       {@const running = $runningRepos.has(repo.id)}
-      <div class="repo-card card" class:disabled={!repo.enabled}>
+      <div class="repo-card card">
         <div class="card-top">
           <div class="repo-meta">
             <button class="repo-name" onclick={() => goto(`/repo/${repo.id}`)}>{repo.name}</button>
@@ -175,21 +160,11 @@
 {/if}
 
 <style>
-  .page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 1.25rem;
-  }
+  .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
   .header-actions { display: flex; gap: 0.5rem; }
   .empty { padding: 3rem 1rem; text-align: center; }
-  .repo-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 0.875rem;
-  }
+  .repo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.875rem; }
   .repo-card { padding: 0.875rem; display: flex; flex-direction: column; gap: 0.5rem; }
-  .repo-card.disabled { opacity: 0.5; }
   .card-top { display: flex; justify-content: space-between; align-items: flex-start; }
   .repo-meta { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
   .repo-name {

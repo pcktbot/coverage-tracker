@@ -3,7 +3,7 @@ use crate::github::GithubClient;
 use crate::git as git_ops;
 use serde::Serialize;
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 pub struct DbState(pub std::sync::Mutex<rusqlite::Connection>);
 
@@ -120,62 +120,93 @@ pub fn set_repo_enabled(state: State<DbState>, id: i64, enabled: bool) -> ApiRes
 }
 
 /// Fetch repos for an org from GitHub and upsert into the DB.
+/// Runs the blocking HTTP work on a background thread so the UI stays responsive.
+/// Emits `sync-progress` events: `{ done: usize, total: usize, name: String }`.
 #[tauri::command]
-pub fn sync_org_repos(state: State<DbState>, org: String) -> ApiResult<usize> {
-    let conn = state.0.lock().unwrap();
-    let token = match db_repos::get_setting(&conn, "github_token") {
-        Ok(Some(t)) if !t.is_empty() => t,
-        _ => return ApiResult::err("GitHub token not configured. Go to Settings."),
-    };
-    let client = GithubClient::new(&token);
-    match client.list_simplecov_repos(&org) {
-        Ok(repos) => {
-            let count = repos.len();
-            for r in &repos {
-                let _ = db_repos::upsert_repo(&conn, &org, &r.name, &r.clone_url);
-            }
-            ApiResult::ok(count)
+pub async fn sync_org_repos(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    org: String,
+) -> Result<ApiResult<usize>, String> {
+    let token = {
+        let conn = state.0.lock().unwrap();
+        match db_repos::get_setting(&conn, "github_token") {
+            Ok(Some(t)) if !t.is_empty() => t,
+            _ => return Ok(ApiResult::err("GitHub token not configured. Go to Settings.")),
         }
-        Err(e) => ApiResult::err(e),
+    };
+
+    let org2 = org.clone();
+    let token2 = token.clone();
+    let repos = match tokio::task::spawn_blocking(move || {
+        GithubClient::new(&token2).list_all_repos(&org2)
+    })
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Ok(ApiResult::err(e)),
+        Err(e) => return Ok(ApiResult::err(format!("Task error: {}", e))),
+    };
+
+    let total = repos.len();
+    let conn = state.0.lock().unwrap();
+    for (i, r) in repos.iter().enumerate() {
+        let _ = db_repos::upsert_repo(&conn, &org, &r.name, &r.clone_url);
+        let _ = app.emit(
+            "sync-progress",
+            serde_json::json!({ "done": i + 1, "total": total, "name": r.name }),
+        );
     }
+    Ok(ApiResult::ok(total))
 }
 
 /// Clone or pull a single repo by its DB id.
 #[tauri::command]
-pub fn clone_or_pull_repo(state: State<DbState>, repo_id: i64) -> ApiResult<String> {
-    let conn = state.0.lock().unwrap();
-    let token = match db_repos::get_setting(&conn, "github_token") {
-        Ok(Some(t)) if !t.is_empty() => t,
-        _ => return ApiResult::err("GitHub token not configured."),
-    };
-    let clone_root = match db_repos::get_setting(&conn, "clone_root") {
-        Ok(Some(p)) if !p.is_empty() => p,
-        _ => return ApiResult::err("Clone root path not configured. Go to Settings."),
-    };
-
-    let repos = match db_repos::list_repos(&conn, None) {
-        Ok(r) => r,
-        Err(e) => return ApiResult::err(e),
-    };
-    let repo = match repos.iter().find(|r| r.id == repo_id) {
-        Some(r) => r.clone(),
-        None => return ApiResult::err(format!("Repo {} not found", repo_id)),
+pub async fn clone_or_pull_repo(state: State<'_, DbState>, repo_id: i64) -> Result<ApiResult<String>, String> {
+    let (token, clone_root, repo) = {
+        let conn = state.0.lock().unwrap();
+        let token = match db_repos::get_setting(&conn, "github_token") {
+            Ok(Some(t)) if !t.is_empty() => t,
+            _ => return Ok(ApiResult::err("GitHub token not configured.")),
+        };
+        let clone_root = match db_repos::get_setting(&conn, "clone_root") {
+            Ok(Some(p)) if !p.is_empty() => p,
+            _ => return Ok(ApiResult::err("Clone root path not configured. Go to Settings.")),
+        };
+        let repos = match db_repos::list_repos(&conn, None) {
+            Ok(r) => r,
+            Err(e) => return Ok(ApiResult::err(e)),
+        };
+        let repo = match repos.into_iter().find(|r| r.id == repo_id) {
+            Some(r) => r,
+            None => return Ok(ApiResult::err(format!("Repo {} not found", repo_id))),
+        };
+        (token, clone_root, repo)
     };
 
     let dest = PathBuf::from(&clone_root).join(&repo.org).join(&repo.name);
-    if let Err(e) = git_ops::clone_or_pull(&repo.github_url, &dest, &token) {
-        return ApiResult::err(format!("Git error: {}", e));
+    let github_url = repo.github_url.clone();
+    let dest2 = dest.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        git_ops::clone_or_pull(&github_url, &dest2, &token)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Ok(ApiResult::err(format!("Git error: {}", e))),
+        Err(e) => return Ok(ApiResult::err(format!("Task error: {}", e))),
     }
 
     let ruby_version = git_ops::read_ruby_version(&dest);
+    let conn = state.0.lock().unwrap();
     if let Err(e) = db_repos::update_repo_local_path(
         &conn,
         repo_id,
         &dest.to_string_lossy(),
         ruby_version.as_deref(),
     ) {
-        return ApiResult::err(e);
+        return Ok(ApiResult::err(e));
     }
-
-    ApiResult::ok(dest.to_string_lossy().to_string())
+    Ok(ApiResult::ok(dest.to_string_lossy().to_string()))
 }
