@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "coverage-manager",
+  "productName": "Coverage Manager",
   "version": "0.1.0",
   "identifier": "com.g5search.coverage-manager",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "coverage-manager",
-        "width": 800,
-        "height": 600
+        "title": "Coverage Manager",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {

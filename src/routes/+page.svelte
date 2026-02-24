@@ -1,156 +1,205 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { repos, activeOrg, enabledRepos, refreshRepos } from '$lib/stores/repos';
+  import { latestRuns, trends, runningRepos, markRunning, markDone } from '$lib/stores/coverage';
+  import CoverageBadge from '$lib/components/CoverageBadge.svelte';
+  import TrendSparkline from '$lib/components/TrendSparkline.svelte';
+  import {
+    syncOrgRepos,
+    cloneOrPullRepo,
+    runCoverage,
+    listRuns,
+    getTrend,
+    exportCsv,
+    downloadCsv,
+  } from '$lib/api';
 
-  let name = $state("");
-  let greetMsg = $state("");
+  let error = $state('');
+  let syncing = $state(false);
+  let cloningAll = $state(false);
+  let runningAll = $state(false);
+  let exporting = $state(false);
 
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  onMount(async () => {
+    await loadRunData();
+  });
+
+  async function loadRunData() {
+    for (const repo of $repos) {
+      try {
+        const runs = await listRuns(repo.id);
+        const latest = runs.find((r) => r.status === 'success' || r.status === 'failed') ?? runs[0];
+        if (latest) {
+          latestRuns.update((m) => { m.set(repo.id, latest); return new Map(m); });
+        }
+        const trend = await getTrend(repo.id, 10);
+        trends.update((m) => { m.set(repo.id, trend); return new Map(m); });
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  async function syncRepos() {
+    if (!$activeOrg) return;
+    syncing = true;
+    error = '';
+    try {
+      await syncOrgRepos($activeOrg);
+      await refreshRepos($activeOrg);
+      await loadRunData();
+    } catch (e: any) {
+      error = e.message;
+    } finally {
+      syncing = false;
+    }
+  }
+
+  async function cloneAll() {
+    cloningAll = true;
+    error = '';
+    for (const repo of $enabledRepos) {
+      try {
+        await cloneOrPullRepo(repo.id);
+      } catch (e: any) {
+        error = (error ? error + '\n' : '') + `${repo.name}: ${e.message}`;
+      }
+    }
+    await refreshRepos($activeOrg ?? undefined);
+    cloningAll = false;
+  }
+
+  async function runRepo(repoId: number) {
+    markRunning(repoId);
+    error = '';
+    try {
+      await runCoverage(repoId);
+      const runs = await listRuns(repoId);
+      const latest = runs[0];
+      if (latest) markDone(repoId, latest);
+      const trend = await getTrend(repoId, 10);
+      trends.update((m) => { m.set(repoId, trend); return new Map(m); });
+    } catch (e: any) {
+      error = (error ? error + '\n' : '') + `Run failed: ${e.message}`;
+      runningRepos.update((s) => { s.delete(repoId); return new Set(s); });
+    }
+  }
+
+  async function runAll() {
+    runningAll = true;
+    for (const repo of $enabledRepos) {
+      await runRepo(repo.id);
+    }
+    runningAll = false;
+  }
+
+  async function doExport(repoId?: number) {
+    exporting = true;
+    error = '';
+    try {
+      const csv = await exportCsv(repoId, false);
+      const name = repoId
+        ? `coverage-${$repos.find((r) => r.id === repoId)?.name ?? repoId}.csv`
+        : `coverage-${$activeOrg ?? 'all'}.csv`;
+      downloadCsv(csv, name);
+    } catch (e: any) {
+      error = e.message;
+    } finally {
+      exporting = false;
+    }
   }
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
-
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
+<div class="page-header">
+  <h1>{$activeOrg ?? 'Coverage'}</h1>
+  <div class="header-actions">
+    <button class="btn-secondary" onclick={syncRepos} disabled={syncing || !$activeOrg}>
+      {syncing ? 'Syncing…' : 'Sync repos'}
+    </button>
+    <button class="btn-secondary" onclick={cloneAll} disabled={cloningAll}>
+      {cloningAll ? 'Cloning…' : 'Clone / pull all'}
+    </button>
+    <button class="btn-primary" onclick={runAll} disabled={runningAll}>
+      {runningAll ? 'Running…' : 'Run all'}
+    </button>
+    <button class="btn-secondary" onclick={() => doExport()} disabled={exporting}>
+      {exporting ? 'Exporting…' : 'Export CSV'}
+    </button>
   </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
+</div>
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
-</main>
+{#if error}
+  <div class="error-msg" style="margin-bottom:1rem">{error}</div>
+{/if}
+
+{#if $repos.length === 0}
+  <div class="empty">
+    <p class="text-secondary">No repos found for <strong>{$activeOrg}</strong>.</p>
+    <p class="text-muted">Click <em>Sync repos</em> to fetch from GitHub, or configure a token in Settings.</p>
+  </div>
+{:else}
+  <div class="repo-grid">
+    {#each $repos as repo}
+      {@const run = $latestRuns.get(repo.id)}
+      {@const trend = $trends.get(repo.id) ?? []}
+      {@const running = $runningRepos.has(repo.id)}
+      <div class="repo-card card" class:disabled={!repo.enabled}>
+        <div class="card-top">
+          <div class="repo-meta">
+            <button class="repo-name" onclick={() => goto(`/repo/${repo.id}`)}>{repo.name}</button>
+            {#if repo.ruby_version}
+              <span class="ruby-tag text-muted mono">ruby {repo.ruby_version}</span>
+            {/if}
+          </div>
+          <CoverageBadge pct={run?.overall_coverage} />
+        </div>
+
+        <div class="card-mid">
+          <TrendSparkline points={trend} width={90} height={30} />
+          {#if run?.status === 'failed'}
+            <span class="badge badge-red" style="font-size:0.6875rem">failed</span>
+          {:else if running}
+            <span class="badge badge-yellow" style="font-size:0.6875rem">running…</span>
+          {/if}
+        </div>
+
+        <div class="card-actions">
+          <button class="btn-ghost" onclick={() => cloneOrPullRepo(repo.id)} disabled={running}>Pull</button>
+          <button class="btn-primary" onclick={() => runRepo(repo.id)} disabled={running || !repo.local_path}>
+            {running ? 'Running…' : 'Run'}
+          </button>
+          <button class="btn-ghost" onclick={() => doExport(repo.id)} disabled={exporting}>CSV</button>
+        </div>
+      </div>
+    {/each}
+  </div>
+{/if}
 
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.25rem;
   }
-
-  a:hover {
-    color: #24c8db;
+  .header-actions { display: flex; gap: 0.5rem; }
+  .empty { padding: 3rem 1rem; text-align: center; }
+  .repo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.875rem;
   }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+  .repo-card { padding: 0.875rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .repo-card.disabled { opacity: 0.5; }
+  .card-top { display: flex; justify-content: space-between; align-items: flex-start; }
+  .repo-meta { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
+  .repo-name {
+    background: none; border: none; padding: 0;
+    font-size: 0.875rem; font-weight: 600; color: var(--accent);
+    cursor: pointer; text-align: left;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
+  .repo-name:hover { text-decoration: underline; }
+  .ruby-tag { font-size: 0.6875rem; }
+  .card-mid { display: flex; align-items: center; gap: 0.5rem; min-height: 32px; }
+  .card-actions { display: flex; gap: 0.375rem; justify-content: flex-end; margin-top: 0.25rem; }
 </style>
