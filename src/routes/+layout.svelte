@@ -7,9 +7,18 @@
   import { setActiveOrg } from '$lib/api';
 
   onMount(async () => {
-    await refreshOrgs();
-    const org = $activeOrg;
-    if (org) await refreshRepos(org);
+    console.log('[layout] onMount start');
+    try {
+      await refreshOrgs();
+      console.log('[layout] refreshOrgs done, activeOrg=', $activeOrg);
+      const org = $activeOrg;
+      if (org) {
+        await refreshRepos(org);
+        console.log('[layout] refreshRepos done');
+      }
+    } catch (e) {
+      console.error('[layout] onMount error:', e);
+    }
   });
 
   async function switchOrg(name: string) {

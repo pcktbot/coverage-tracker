@@ -147,19 +147,25 @@ export async function runCoverage(repoId: number): Promise<number> {
 }
 
 export async function listRuns(repoId: number): Promise<CoverageRun[]> {
+  console.log('[api] listRuns invoke start, repoId=', repoId);
   const r: ApiResult<CoverageRun[]> = await invoke('list_runs', { repoId });
+  console.log('[api] listRuns invoke done, ok=', r.ok, 'data length=', r.data?.length);
   if (!r.ok) throw new Error(r.error);
   return r.data!;
 }
 
 export async function getTrend(repoId: number, limit = 20): Promise<CoverageTrendPoint[]> {
+  console.log('[api] getTrend invoke start, repoId=', repoId);
   const r: ApiResult<CoverageTrendPoint[]> = await invoke('get_trend', { repoId, limit });
+  console.log('[api] getTrend invoke done, ok=', r.ok, 'data length=', r.data?.length);
   if (!r.ok) throw new Error(r.error);
   return r.data!;
 }
 
 export async function getFileCoverage(runId: number): Promise<FileCoverage[]> {
+  console.log('[api] getFileCoverage invoke start, runId=', runId);
   const r: ApiResult<FileCoverage[]> = await invoke('get_file_coverage', { runId });
+  console.log('[api] getFileCoverage invoke done, ok=', r.ok, 'data length=', r.data?.length);
   if (!r.ok) throw new Error(r.error);
   return r.data!;
 }

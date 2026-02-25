@@ -1,9 +1,12 @@
 <script lang="ts">
-  export let pct: number | undefined = undefined;
-  export let size: 'sm' | 'md' = 'md';
+  interface Props {
+    pct?: number | null;
+    size?: 'sm' | 'md';
+  }
+  let { pct = undefined, size = 'md' }: Props = $props();
 
-  function color(p: number | undefined): string {
-    if (p === undefined) return 'badge-gray';
+  function color(p: number | null | undefined): string {
+    if (p == null) return 'badge-gray';
     if (p >= 80) return 'badge-green';
     if (p >= 60) return 'badge-yellow';
     return 'badge-red';
@@ -11,7 +14,7 @@
 </script>
 
 <span class="badge {color(pct)}" class:sm={size === 'sm'}>
-  {#if pct !== undefined}
+  {#if pct != null}
     {pct.toFixed(1)}%
   {:else}
     —

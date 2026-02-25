@@ -34,6 +34,18 @@ pub struct CoverageTrendPoint {
     pub status: String,
 }
 
+/// On startup, any runs still marked 'running' were interrupted (crash, quit, etc.).
+/// Mark them so the UI doesn't show stale "running" badges.
+pub fn mark_interrupted_runs(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE coverage_runs SET status = 'interrupted', completed_at = datetime('now'),
+                error_message = 'Run was interrupted (app closed before completion)'
+         WHERE status = 'running'",
+        [],
+    )?;
+    Ok(count)
+}
+
 pub fn start_run(conn: &Connection, repo_id: i64) -> Result<i64> {
     conn.execute(
         "INSERT INTO coverage_runs (repo_id, started_at, status)

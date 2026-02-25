@@ -23,100 +23,125 @@ impl<T: Serialize> ApiResult<T> {
     }
 }
 
+/// Run a closure with the DB connection on a blocking thread.
+/// Keeps heavy / mutex work off the Tauri main thread so the window never freezes.
+pub async fn with_db<T, F>(db: &std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
+{
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        f(&conn)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 // ── Orgs ──────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn list_orgs(state: State<DbState>) -> ApiResult<Vec<db_repos::Org>> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::list_orgs(&conn) {
-        Ok(orgs) => ApiResult::ok(orgs),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn list_orgs(state: State<'_, DbState>) -> Result<ApiResult<Vec<db_repos::Org>>, String> {
+    with_db(&state.0, |conn| {
+        match db_repos::list_orgs(conn) {
+            Ok(orgs) => ApiResult::ok(orgs),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 #[tauri::command]
-pub fn add_org(state: State<DbState>, name: String) -> ApiResult<()> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::add_org(&conn, &name) {
-        Ok(_) => ApiResult::ok(()),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn add_org(state: State<'_, DbState>, name: String) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        match db_repos::add_org(conn, &name) {
+            Ok(_) => ApiResult::ok(()),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 #[tauri::command]
-pub fn remove_org(state: State<DbState>, name: String) -> ApiResult<()> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::remove_org(&conn, &name) {
-        Ok(_) => ApiResult::ok(()),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn remove_org(state: State<'_, DbState>, name: String) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        match db_repos::remove_org(conn, &name) {
+            Ok(_) => ApiResult::ok(()),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 #[tauri::command]
-pub fn set_active_org(state: State<DbState>, name: String) -> ApiResult<()> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::set_active_org(&conn, &name) {
-        Ok(_) => ApiResult::ok(()),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn set_active_org(state: State<'_, DbState>, name: String) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        match db_repos::set_active_org(conn, &name) {
+            Ok(_) => ApiResult::ok(()),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 #[tauri::command]
-pub fn get_active_org(state: State<DbState>) -> ApiResult<Option<String>> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::get_active_org(&conn) {
-        Ok(org) => ApiResult::ok(org),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn get_active_org(state: State<'_, DbState>) -> Result<ApiResult<Option<String>>, String> {
+    with_db(&state.0, |conn| {
+        match db_repos::get_active_org(conn) {
+            Ok(org) => ApiResult::ok(org),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn get_settings(state: State<DbState>) -> ApiResult<serde_json::Value> {
-    let conn = state.0.lock().unwrap();
-    let token = db_repos::get_setting(&conn, "github_token").unwrap_or(None);
-    let clone_root = db_repos::get_setting(&conn, "clone_root").unwrap_or(None);
-    ApiResult::ok(serde_json::json!({
-        "github_token": token.unwrap_or_default(),
-        "clone_root": clone_root.unwrap_or_default(),
-    }))
+pub async fn get_settings(state: State<'_, DbState>) -> Result<ApiResult<serde_json::Value>, String> {
+    with_db(&state.0, |conn| {
+        let token = db_repos::get_setting(conn, "github_token").unwrap_or(None);
+        let clone_root = db_repos::get_setting(conn, "clone_root").unwrap_or(None);
+        ApiResult::ok(serde_json::json!({
+            "github_token": token.unwrap_or_default(),
+            "clone_root": clone_root.unwrap_or_default(),
+        }))
+    }).await
 }
 
 #[tauri::command]
-pub fn save_settings(
-    state: State<DbState>,
+pub async fn save_settings(
+    state: State<'_, DbState>,
     github_token: String,
     clone_root: String,
-) -> ApiResult<()> {
-    let conn = state.0.lock().unwrap();
-    if let Err(e) = db_repos::set_setting(&conn, "github_token", &github_token) {
-        return ApiResult::err(e);
-    }
-    if let Err(e) = db_repos::set_setting(&conn, "clone_root", &clone_root) {
-        return ApiResult::err(e);
-    }
-    ApiResult::ok(())
+) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        if let Err(e) = db_repos::set_setting(conn, "github_token", &github_token) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "clone_root", &clone_root) {
+            return ApiResult::err(e);
+        }
+        ApiResult::ok(())
+    }).await
 }
 
 // ── Repos ─────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn list_repos(state: State<DbState>, org: Option<String>) -> ApiResult<Vec<db_repos::Repo>> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::list_repos(&conn, org.as_deref()) {
-        Ok(repos) => ApiResult::ok(repos),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn list_repos(state: State<'_, DbState>, org: Option<String>) -> Result<ApiResult<Vec<db_repos::Repo>>, String> {
+    with_db(&state.0, move |conn| {
+        match db_repos::list_repos(conn, org.as_deref()) {
+            Ok(repos) => ApiResult::ok(repos),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 #[tauri::command]
-pub fn set_repo_enabled(state: State<DbState>, id: i64, enabled: bool) -> ApiResult<()> {
-    let conn = state.0.lock().unwrap();
-    match db_repos::set_repo_enabled(&conn, id, enabled) {
-        Ok(_) => ApiResult::ok(()),
-        Err(e) => ApiResult::err(e),
-    }
+pub async fn set_repo_enabled(state: State<'_, DbState>, id: i64, enabled: bool) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        match db_repos::set_repo_enabled(conn, id, enabled) {
+            Ok(_) => ApiResult::ok(()),
+            Err(e) => ApiResult::err(e),
+        }
+    }).await
 }
 
 /// Fetch repos for an org from GitHub and upsert into the DB.
@@ -170,46 +195,48 @@ pub async fn sync_org_repos(
 
 /// Read a repo's .env file contents. Returns empty string if the file doesn't exist.
 #[tauri::command]
-pub fn read_env_file(state: State<DbState>, repo_id: i64) -> ApiResult<String> {
-    let conn = state.0.lock().unwrap();
-    let repos = match db_repos::list_repos(&conn, None) {
-        Ok(r) => r,
-        Err(e) => return ApiResult::err(e),
-    };
-    let repo = match repos.into_iter().find(|r| r.id == repo_id) {
-        Some(r) => r,
-        None => return ApiResult::err(format!("Repo {} not found", repo_id)),
-    };
-    let local_path = match &repo.local_path {
-        Some(p) => PathBuf::from(p),
-        None => return ApiResult::err("Repo has not been cloned yet."),
-    };
-    let env_path = local_path.join(".env.test");
-    let content = std::fs::read_to_string(&env_path).unwrap_or_default();
-    ApiResult::ok(content)
+pub async fn read_env_file(state: State<'_, DbState>, repo_id: i64) -> Result<ApiResult<String>, String> {
+    with_db(&state.0, move |conn| {
+        let repos = match db_repos::list_repos(conn, None) {
+            Ok(r) => r,
+            Err(e) => return ApiResult::err(e),
+        };
+        let repo = match repos.into_iter().find(|r| r.id == repo_id) {
+            Some(r) => r,
+            None => return ApiResult::err(format!("Repo {} not found", repo_id)),
+        };
+        let local_path = match &repo.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ApiResult::err("Repo has not been cloned yet."),
+        };
+        let env_path = local_path.join(".env.test");
+        let content = std::fs::read_to_string(&env_path).unwrap_or_default();
+        ApiResult::ok(content)
+    }).await
 }
 
 /// Write content to a repo's .env.test file.
 #[tauri::command]
-pub fn write_env_file(state: State<DbState>, repo_id: i64, content: String) -> ApiResult<()> {
-    let conn = state.0.lock().unwrap();
-    let repos = match db_repos::list_repos(&conn, None) {
-        Ok(r) => r,
-        Err(e) => return ApiResult::err(e),
-    };
-    let repo = match repos.into_iter().find(|r| r.id == repo_id) {
-        Some(r) => r,
-        None => return ApiResult::err(format!("Repo {} not found", repo_id)),
-    };
-    let local_path = match &repo.local_path {
-        Some(p) => PathBuf::from(p),
-        None => return ApiResult::err("Repo has not been cloned yet."),
-    };
-    let env_path = local_path.join(".env.test");
-    match std::fs::write(&env_path, &content) {
-        Ok(_) => ApiResult::ok(()),
-        Err(e) => ApiResult::err(format!("Failed to write .env.test: {}", e)),
-    }
+pub async fn write_env_file(state: State<'_, DbState>, repo_id: i64, content: String) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        let repos = match db_repos::list_repos(conn, None) {
+            Ok(r) => r,
+            Err(e) => return ApiResult::err(e),
+        };
+        let repo = match repos.into_iter().find(|r| r.id == repo_id) {
+            Some(r) => r,
+            None => return ApiResult::err(format!("Repo {} not found", repo_id)),
+        };
+        let local_path = match &repo.local_path {
+            Some(p) => PathBuf::from(p),
+            None => return ApiResult::err("Repo has not been cloned yet."),
+        };
+        let env_path = local_path.join(".env.test");
+        match std::fs::write(&env_path, &content) {
+            Ok(_) => ApiResult::ok(()),
+            Err(e) => ApiResult::err(format!("Failed to write .env.test: {}", e)),
+        }
+    }).await
 }
 
 /// Clone or pull a single repo by its DB id.

@@ -12,6 +12,13 @@ use commands::runner::RunnerState;
 pub fn run() {
     let conn = db::open().expect("failed to open database");
 
+    // Mark any runs left as 'running' from a previous session as interrupted
+    match db::coverage::mark_interrupted_runs(&conn) {
+        Ok(n) if n > 0 => eprintln!("Marked {n} stale running run(s) as interrupted"),
+        Err(e) => eprintln!("Warning: failed to clean up stale runs: {e}"),
+        _ => {}
+    }
+
     // Seed default orgs on first run
     let _ = db::repos::add_org(&conn, "g5search");
     let _ = db::repos::add_org(&conn, "g5components");

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { page } from '$app/stores';
-  import { goto } from '$app/navigation';
   import { repos, refreshRepos } from '$lib/stores/repos';
   import { runningRepos, markRunning, markDone } from '$lib/stores/coverage';
   import CoverageBadge from '$lib/components/CoverageBadge.svelte';
@@ -31,6 +30,7 @@
   let selectedRunId = $state<number | null>(null);
   let running = $derived($runningRepos.has(repoId));
   let error = $state('');
+  let loading = $state(false);
   let exporting = $state(false);
   let pulling = $state(false);
   let pullSuccess = $state(false);
@@ -48,20 +48,39 @@
   let envError = $state('');
   let envDirty = $derived(envContent !== envOriginal);
 
-  onMount(async () => {
-    await load();
+  onMount(() => {
+    const id = repoId;
+    console.log('[repo-page] onMount, repoId=', id);
+    if (Number.isFinite(id)) {
+      load(id);
+    } else {
+      console.error('[repo-page] invalid repoId:', $page.params.id);
+    }
   });
 
-  async function load() {
+  async function load(id: number) {
+    loading = true;
+    error = '';
+    console.log('[repo-page] load() starting for id=', id);
     try {
-      runs = await listRuns(repoId);
-      trend = await getTrend(repoId, 20);
-      if (runs.length > 0) {
-        selectedRunId = runs[0].id;
-        files = await getFileCoverage(selectedRunId);
+      const [r, t] = await Promise.all([listRuns(id), getTrend(id, 20)]);
+      console.log('[repo-page] load() got', r.length, 'runs,', t.length, 'trend points');
+      runs = r;
+      trend = t;
+      if (r.length > 0) {
+        selectedRunId = r[0].id;
+        files = await getFileCoverage(r[0].id);
+        console.log('[repo-page] load() got', files.length, 'files for run', r[0].id);
+      } else {
+        selectedRunId = null;
+        files = [];
       }
     } catch (e: any) {
-      error = e.message;
+      console.error('[repo-page] load() error:', e);
+      error = e?.message ?? String(e);
+    } finally {
+      loading = false;
+      console.log('[repo-page] load() done. loading=false, runs=', runs.length, 'error=', error);
     }
   }
 
@@ -233,11 +252,22 @@
     ranges.push(start === end ? `L${start}` : `L${start}-${end}`);
     return ranges.join(', ');
   }
+
+  /** Strip the repo local_path prefix from absolute file paths to show relative paths */
+  function shortPath(fullPath: string): string {
+    const root = repo?.local_path;
+    if (root && fullPath.startsWith(root)) {
+      return fullPath.slice(root.length).replace(/^\//, '');
+    }
+    // Fallback: show just the last 3 path segments
+    const parts = fullPath.split('/');
+    return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : fullPath;
+  }
 </script>
 
 <div class="detail-header">
   <div>
-    <button class="back-btn btn-ghost" onclick={() => goto('/')}>← Back</button>
+    <a href="/" class="back-btn btn-ghost">← Back</a>
     <h1>{repo?.name ?? '…'}</h1>
     {#if repo?.ruby_version}
       <span class="text-muted mono" style="font-size:0.8125rem">ruby {repo.ruby_version}</span>
@@ -261,39 +291,13 @@
   <div class="error-msg" style="margin-bottom:1rem">{error}</div>
 {/if}
 
-<!-- Env editor (always visible when repo has been cloned) -->
-{#if repo?.local_path}
+{#if loading}
   <div class="section">
-    <button class="env-toggle" onclick={toggleEnv}>
-      <span class="env-chevron" class:open={envOpen}>&#9654;</span>
-      <h2 style="display:inline;margin:0">.env.test</h2>
-    </button>
-    {#if envOpen}
-      {#if envLoading}
-        <p class="text-muted" style="padding:0.5rem 0">Loading…</p>
-      {:else}
-        {#if envError}
-          <div class="error-msg" style="margin-bottom:0.5rem">{envError}</div>
-        {/if}
-        <textarea
-          class="env-editor"
-          bind:value={envContent}
-          spellcheck="false"
-          placeholder="# KEY=value"
-          rows="10"
-        ></textarea>
-        <div class="env-actions">
-          <button class="btn-primary" onclick={saveEnv} disabled={envSaving || !envDirty}>
-            {envSaving ? 'Saving…' : 'Save .env.test'}
-          </button>
-          <button class="btn-ghost" onclick={loadEnv} disabled={envLoading}>Reload</button>
-          {#if envSaved}<span class="badge badge-green">Saved!</span>{/if}
-          {#if envDirty}<span class="text-muted" style="font-size:0.75rem">unsaved changes</span>{/if}
-        </div>
-      {/if}
-    {/if}
+    <p class="text-muted">Loading coverage data…</p>
   </div>
 {/if}
+
+{#if !loading}
 
 {#if running || lastRunFailed}
   <div class="section">
@@ -305,41 +309,20 @@
 {/if}
 
 <!-- Error detail for failed runs -->
-{#if selectedRun?.status === 'failed' && selectedRun.error_message && !running && !lastRunFailed}
+{#if (selectedRun?.status === 'failed' || selectedRun?.status === 'interrupted') && selectedRun.error_message && !running && !lastRunFailed}
   <div class="section">
     <h2>Error detail</h2>
     <pre class="error-detail">{selectedRun.error_message}</pre>
   </div>
 {/if}
 
-<!-- Trend chart -->
-{#if trendPoints.length > 1}
-  <div class="section card" style="padding:1rem">
-    <h2 style="margin-bottom:0.75rem">Coverage trend</h2>
-    <svg width={CHART_W} height={CHART_H} style="width:100%;max-width:{CHART_W}px">
-      <!-- Y axis labels -->
-      {#each [0, 25, 50, 75, 100] as tick}
-        {@const y = CHART_H - PAD - (tick / 100) * (CHART_H - PAD * 2)}
-        <line x1={PAD} x2={CHART_W - PAD} y1={y} y2={y} stroke="var(--border-subtle)" stroke-width="1"/>
-        <text x={PAD - 4} y={y + 4} text-anchor="end" font-size="10" fill="var(--text-muted)">{tick}%</text>
-      {/each}
-      <polyline points={polyline} fill="none" stroke="var(--accent)" stroke-width="2"
-        stroke-linejoin="round" stroke-linecap="round"/>
-      {#each trendPoints as p}
-        <circle cx={p.x} cy={p.y} r="3" fill="var(--accent)">
-          <title>{p.pct.toFixed(1)}% — {formatDate(p.date)}</title>
-        </circle>
-      {/each}
-    </svg>
-  </div>
-{/if}
-
+<!-- Coverage data: run history + file coverage (primary content) -->
 <div class="two-col">
   <!-- Run history -->
   <div class="section card">
     <h2 style="padding:0.75rem 1rem;border-bottom:1px solid var(--border)">Run history</h2>
     {#if runs.length === 0}
-      <p class="text-muted" style="padding:1rem">No runs yet.</p>
+      <p class="text-muted" style="padding:1rem">No runs yet. Click <strong>Run</strong> to start.</p>
     {:else}
       <table>
         <thead>
@@ -355,7 +338,7 @@
               <td class="mono" style="font-size:0.75rem">{formatDate(run.started_at)}</td>
               <td><CoverageBadge pct={run.overall_coverage} size="sm" /></td>
               <td>
-                <span class="badge {run.status === 'success' ? 'badge-green' : run.status === 'failed' ? 'badge-red' : 'badge-yellow'}"
+                <span class="badge {run.status === 'success' ? 'badge-green' : run.status === 'failed' || run.status === 'interrupted' ? 'badge-red' : 'badge-yellow'}"
                   style="font-size:0.6875rem">{run.status}</span>
               </td>
             </tr>
@@ -382,13 +365,13 @@
       <div class="file-list">
         {#each files as f}
           <div class="file-entry">
-            <button class="file-row" onclick={() => f.uncovered_lines.length > 0 && toggleFile(f.file_path)}>
-              {#if f.uncovered_lines.length > 0}
+            <button class="file-row" onclick={() => (f.uncovered_lines?.length ?? 0) > 0 && toggleFile(f.file_path)}>
+              {#if (f.uncovered_lines?.length ?? 0) > 0}
                 <span class="file-chevron" class:open={expandedFiles.has(f.file_path)}>&#9654;</span>
               {:else}
                 <span class="file-chevron-spacer"></span>
               {/if}
-              <span class="file-path mono">{f.file_path}</span>
+              <span class="file-path mono" title={f.file_path}>{shortPath(f.file_path)}</span>
               <div class="file-right">
                 <span class="file-lines mono">{f.lines_covered ?? 0}/{f.lines_total ?? 0}</span>
                 <div class="coverage-bar-wrap">
@@ -401,10 +384,10 @@
                 <span class="file-pct">{(f.coverage_percent ?? 0).toFixed(1)}%</span>
               </div>
             </button>
-            {#if expandedFiles.has(f.file_path) && f.uncovered_lines.length > 0}
+            {#if expandedFiles.has(f.file_path) && (f.uncovered_lines?.length ?? 0) > 0}
               <div class="uncovered-lines">
-                <span class="uncovered-label">Uncovered ({f.uncovered_lines.length} lines):</span>
-                <span class="uncovered-ranges mono">{formatLineRanges(f.uncovered_lines)}</span>
+                <span class="uncovered-label">Uncovered ({f.uncovered_lines?.length ?? 0} lines):</span>
+                <span class="uncovered-ranges mono">{formatLineRanges(f.uncovered_lines ?? [])}</span>
               </div>
             {/if}
           </div>
@@ -414,24 +397,86 @@
   </div>
 </div>
 
+<!-- Trend chart -->
+{#if trendPoints.length > 1}
+  <div class="section card" style="padding:1rem">
+    <h2 style="margin-bottom:0.75rem">Coverage trend</h2>
+    <svg width={CHART_W} height={CHART_H} style="width:100%;max-width:{CHART_W}px">
+      <!-- Y axis labels -->
+      {#each [0, 25, 50, 75, 100] as tick}
+        {@const y = CHART_H - PAD - (tick / 100) * (CHART_H - PAD * 2)}
+        <line x1={PAD} x2={CHART_W - PAD} y1={y} y2={y} stroke="var(--border-subtle)" stroke-width="1"/>
+        <text x={PAD - 4} y={y + 4} text-anchor="end" font-size="10" fill="var(--text-muted)">{tick}%</text>
+      {/each}
+      <polyline points={polyline} fill="none" stroke="var(--accent)" stroke-width="2"
+        stroke-linejoin="round" stroke-linecap="round"/>
+      {#each trendPoints as p}
+        <circle cx={p.x} cy={p.y} r="3" fill="var(--accent)">
+          <title>{p.pct.toFixed(1)}% — {formatDate(p.date)}</title>
+        </circle>
+      {/each}
+    </svg>
+  </div>
+{/if}
+
+<!-- Env editor (collapsible, secondary) -->
+<div class="section">
+  <button class="env-toggle" onclick={toggleEnv}>
+    <span class="env-chevron" class:open={envOpen}>&#9654;</span>
+    <h2 style="display:inline;margin:0">.env.test</h2>
+  </button>
+  {#if envOpen}
+    {#if envLoading}
+      <p class="text-muted" style="padding:0.5rem 0">Loading…</p>
+    {:else}
+      {#if envError}
+        <div class="error-msg" style="margin-bottom:0.5rem">{envError}</div>
+      {/if}
+      <textarea
+        class="env-editor"
+        bind:value={envContent}
+        spellcheck="false"
+        placeholder="# KEY=value"
+        rows="10"
+      ></textarea>
+      <div class="env-actions">
+        <button class="btn-primary" onclick={saveEnv} disabled={envSaving || !envDirty}>
+          {envSaving ? 'Saving…' : 'Save .env.test'}
+        </button>
+        <button class="btn-ghost" onclick={loadEnv} disabled={envLoading}>Reload</button>
+        {#if envSaved}<span class="badge badge-green">Saved!</span>{/if}
+        {#if envDirty}<span class="text-muted" style="font-size:0.75rem">unsaved changes</span>{/if}
+      </div>
+    {/if}
+  {/if}
+</div>
+
+{/if} <!-- end !loading -->
+
 <style>
   .detail-header {
     display: flex; justify-content: space-between; align-items: flex-start;
     margin-bottom: 1.25rem; gap: 1rem;
   }
-  .back-btn { margin-bottom: 0.25rem; padding: 0.125rem 0; }
+  .back-btn {
+    margin-bottom: 0.25rem; padding: 0.125rem 0;
+    display: inline-block; text-decoration: none;
+    color: var(--text-secondary); font-size: 0.8125rem;
+  }
+  .back-btn:hover { color: var(--accent); text-decoration: none; }
   .header-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
   .section { margin-bottom: 1rem; }
-  .two-col { display: grid; grid-template-columns: 1fr 1.5fr; gap: 1rem; }
+  .two-col { display: grid; grid-template-columns: 280px 1fr; gap: 1rem; min-width: 0; }
+  .two-col > * { min-width: 0; overflow: hidden; }
   tr.selected td { background: var(--accent-subtle); }
-  .file-list { max-height: 600px; overflow-y: auto; }
+  .file-list { max-height: calc(100vh - 280px); overflow-y: auto; overflow-x: hidden; }
   .file-entry { border-bottom: 1px solid var(--border-subtle); }
   .file-entry:last-child { border-bottom: none; }
   .file-row {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; align-items: center;
     padding: 0.3rem 0.75rem; gap: 0.5rem; width: 100%;
     background: none; border: none; cursor: pointer; color: inherit;
-    text-align: left;
+    text-align: left; min-width: 0;
   }
   .file-row:hover { background: var(--bg-muted); }
   .file-chevron {
@@ -440,12 +485,16 @@
   }
   .file-chevron.open { transform: rotate(90deg); }
   .file-chevron-spacer { width: 0.75rem; flex-shrink: 0; }
-  .file-path { font-size: 0.6875rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .file-path {
+    font-size: 0.6875rem; min-width: 0; flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    direction: rtl; text-align: left;
+  }
   .file-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
   .file-lines { font-size: 0.625rem; color: var(--text-muted); white-space: nowrap; }
-  .coverage-bar-wrap { width: 60px; height: 6px; background: var(--bg-muted); border-radius: 3px; overflow: hidden; }
+  .coverage-bar-wrap { width: 48px; height: 6px; background: var(--bg-muted); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
   .coverage-bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
-  .file-pct { font-size: 0.6875rem; width: 40px; text-align: right; font-weight: 500; }
+  .file-pct { font-size: 0.6875rem; width: 40px; text-align: right; font-weight: 500; flex-shrink: 0; }
   .uncovered-lines {
     padding: 0.25rem 0.75rem 0.5rem 1.75rem;
     font-size: 0.6875rem; line-height: 1.5;
@@ -453,7 +502,11 @@
   }
   .uncovered-label { color: var(--danger); font-weight: 500; margin-right: 0.5rem; }
   .uncovered-ranges { color: var(--text-secondary); word-break: break-all; }
-  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) {
+    .detail-header { flex-direction: column; }
+    .header-actions { width: 100%; justify-content: flex-start; }
+  }
 
   /* Env editor */
   .env-toggle {
