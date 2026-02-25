@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { repos } from '$lib/stores/repos';
-  import { markRunning, markDone } from '$lib/stores/coverage';
+  import { repos, refreshRepos } from '$lib/stores/repos';
+  import { runningRepos, markRunning, markDone } from '$lib/stores/coverage';
   import CoverageBadge from '$lib/components/CoverageBadge.svelte';
   import TrendSparkline from '$lib/components/TrendSparkline.svelte';
   import RunLog from '$lib/components/RunLog.svelte';
@@ -13,6 +13,8 @@
     getFileCoverage,
     runCoverage,
     cloneOrPullRepo,
+    readEnvFile,
+    writeEnvFile,
     exportCsv,
     downloadCsv,
     type CoverageRun,
@@ -27,10 +29,24 @@
   let trend = $state<CoverageTrendPoint[]>([]);
   let files = $state<FileCoverage[]>([]);
   let selectedRunId = $state<number | null>(null);
-  let running = $state(false);
+  let running = $derived($runningRepos.has(repoId));
   let error = $state('');
   let exporting = $state(false);
+  let pulling = $state(false);
+  let pullSuccess = $state(false);
   let runLogKey = $state(0);
+  let lastRunFailed = $state(false);
+  let selectedRun = $derived(runs.find(r => r.id === selectedRunId));
+
+  // Env editor
+  let envOpen = $state(false);
+  let envContent = $state('');
+  let envOriginal = $state('');
+  let envLoading = $state(false);
+  let envSaving = $state(false);
+  let envSaved = $state(false);
+  let envError = $state('');
+  let envDirty = $derived(envContent !== envOriginal);
 
   onMount(async () => {
     await load();
@@ -60,10 +76,12 @@
 
   async function doRun() {
     if (!repo) return;
-    running = true;
+    lastRunFailed = false;
     runLogKey++;
     error = '';
     markRunning(repoId);
+    // Flush the DOM so RunLog is mounted & listening before events arrive
+    await tick();
     try {
       await runCoverage(repoId);
       runs = await listRuns(repoId);
@@ -72,21 +90,39 @@
         selectedRunId = runs[0].id;
         files = await getFileCoverage(selectedRunId);
         markDone(repoId, runs[0]);
+      } else {
+        // No runs found — clear running state
+        runningRepos.update((s) => { s.delete(repoId); return new Set(s); });
       }
     } catch (e: any) {
       error = e.message;
-    } finally {
-      running = false;
+      lastRunFailed = true;
+      // Always clear running state on error
+      runningRepos.update((s) => { s.delete(repoId); return new Set(s); });
+      // Refresh runs so we capture the failed entry
+      try {
+        runs = await listRuns(repoId);
+        if (runs.length > 0) selectedRunId = runs[0].id;
+      } catch { /* non-fatal */ }
     }
   }
 
   async function doPull() {
     if (!repo) return;
+    pulling = true;
+    pullSuccess = false;
     error = '';
     try {
       await cloneOrPullRepo(repo.id);
+      // Refresh the repos store so local_path / ruby_version update in the UI
+      const org = repo.org;
+      await refreshRepos(org);
+      pullSuccess = true;
+      setTimeout(() => (pullSuccess = false), 3000);
     } catch (e: any) {
       error = e.message;
+    } finally {
+      pulling = false;
     }
   }
 
@@ -107,6 +143,43 @@
     return new Date(iso).toLocaleString();
   }
 
+  function toggleEnv() {
+    envOpen = !envOpen;
+    if (envOpen && !envContent) {
+      loadEnv();
+    }
+  }
+
+  async function loadEnv() {
+    envLoading = true;
+    envError = '';
+    try {
+      const content = await readEnvFile(repoId);
+      envContent = content;
+      envOriginal = content;
+    } catch (e: any) {
+      envError = e.message;
+    } finally {
+      envLoading = false;
+    }
+  }
+
+  async function saveEnv() {
+    envSaving = true;
+    envError = '';
+    envSaved = false;
+    try {
+      await writeEnvFile(repoId, envContent);
+      envOriginal = envContent;
+      envSaved = true;
+      setTimeout(() => (envSaved = false), 2000);
+    } catch (e: any) {
+      envError = e.message;
+    } finally {
+      envSaving = false;
+    }
+  }
+
   // Simple SVG trend chart
   const CHART_W = 480;
   const CHART_H = 120;
@@ -123,6 +196,43 @@
     })
   );
   let polyline = $derived(trendPoints.map((p) => `${p.x},${p.y}`).join(' '));
+
+  // Track which files are expanded to show uncovered lines
+  let expandedFiles = $state<Set<string>>(new Set());
+
+  function toggleFile(path: string) {
+    expandedFiles = new Set(expandedFiles);
+    if (expandedFiles.has(path)) {
+      expandedFiles.delete(path);
+    } else {
+      expandedFiles.add(path);
+    }
+  }
+
+  // Compute summary totals from file data
+  let totalCovered = $derived(files.reduce((s, f) => s + (f.lines_covered ?? 0), 0));
+  let totalLines = $derived(files.reduce((s, f) => s + (f.lines_total ?? 0), 0));
+  let totalPct = $derived(totalLines > 0 ? (totalCovered / totalLines * 100) : 0);
+
+  /** Group consecutive line numbers into ranges: [1,2,3,7,8,12] → "L1-3, L7-8, L12" */
+  function formatLineRanges(lines: number[]): string {
+    if (!lines || lines.length === 0) return '';
+    const sorted = [...lines].sort((a, b) => a - b);
+    const ranges: string[] = [];
+    let start = sorted[0];
+    let end = sorted[0];
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] === end + 1) {
+        end = sorted[i];
+      } else {
+        ranges.push(start === end ? `L${start}` : `L${start}-${end}`);
+        start = sorted[i];
+        end = sorted[i];
+      }
+    }
+    ranges.push(start === end ? `L${start}` : `L${start}-${end}`);
+    return ranges.join(', ');
+  }
 </script>
 
 <div class="detail-header">
@@ -134,7 +244,10 @@
     {/if}
   </div>
   <div class="header-actions">
-    <button class="btn-secondary" onclick={doPull} disabled={running}>Pull</button>
+    <button class="btn-secondary" onclick={doPull} disabled={running || pulling}>
+      {pulling ? 'Pulling…' : 'Pull'}
+    </button>
+    {#if pullSuccess}<span class="badge badge-green" style="align-self:center">Pulled!</span>{/if}
     <button class="btn-primary" onclick={doRun} disabled={running || !repo?.local_path}>
       {running ? 'Running…' : 'Run'}
     </button>
@@ -148,12 +261,54 @@
   <div class="error-msg" style="margin-bottom:1rem">{error}</div>
 {/if}
 
-{#if running}
+<!-- Env editor (always visible when repo has been cloned) -->
+{#if repo?.local_path}
   <div class="section">
-    <h2>Live output</h2>
+    <button class="env-toggle" onclick={toggleEnv}>
+      <span class="env-chevron" class:open={envOpen}>&#9654;</span>
+      <h2 style="display:inline;margin:0">.env.test</h2>
+    </button>
+    {#if envOpen}
+      {#if envLoading}
+        <p class="text-muted" style="padding:0.5rem 0">Loading…</p>
+      {:else}
+        {#if envError}
+          <div class="error-msg" style="margin-bottom:0.5rem">{envError}</div>
+        {/if}
+        <textarea
+          class="env-editor"
+          bind:value={envContent}
+          spellcheck="false"
+          placeholder="# KEY=value"
+          rows="10"
+        ></textarea>
+        <div class="env-actions">
+          <button class="btn-primary" onclick={saveEnv} disabled={envSaving || !envDirty}>
+            {envSaving ? 'Saving…' : 'Save .env.test'}
+          </button>
+          <button class="btn-ghost" onclick={loadEnv} disabled={envLoading}>Reload</button>
+          {#if envSaved}<span class="badge badge-green">Saved!</span>{/if}
+          {#if envDirty}<span class="text-muted" style="font-size:0.75rem">unsaved changes</span>{/if}
+        </div>
+      {/if}
+    {/if}
+  </div>
+{/if}
+
+{#if running || lastRunFailed}
+  <div class="section">
+    <h2>{running ? 'Live output' : 'Run output'}</h2>
     {#key runLogKey}
-      <RunLog {repoId} runId={selectedRunId} />
+      <RunLog {repoId} runId={null} />
     {/key}
+  </div>
+{/if}
+
+<!-- Error detail for failed runs -->
+{#if selectedRun?.status === 'failed' && selectedRun.error_message && !running && !lastRunFailed}
+  <div class="section">
+    <h2>Error detail</h2>
+    <pre class="error-detail">{selectedRun.error_message}</pre>
   </div>
 {/if}
 
@@ -212,24 +367,46 @@
 
   <!-- File coverage -->
   <div class="section card">
-    <h2 style="padding:0.75rem 1rem;border-bottom:1px solid var(--border)">File coverage</h2>
+    <div style="padding:0.75rem 1rem;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">File coverage</h2>
+      {#if files.length > 0}
+        <div style="display:flex;align-items:center;gap:0.75rem">
+          <span class="mono" style="font-size:0.75rem;color:var(--text-muted)">{totalCovered}/{totalLines} lines</span>
+          <CoverageBadge pct={totalPct} size="sm" />
+        </div>
+      {/if}
+    </div>
     {#if files.length === 0}
       <p class="text-muted" style="padding:1rem">No file data.</p>
     {:else}
       <div class="file-list">
         {#each files as f}
-          <div class="file-row">
-            <span class="file-path mono">{f.file_path}</span>
-            <div class="file-right">
-              <div class="coverage-bar-wrap">
-                <div class="coverage-bar"
-                  style="width:{f.coverage_percent ?? 0}%;background:{
-                    (f.coverage_percent ?? 0) >= 80 ? 'var(--success)' :
-                    (f.coverage_percent ?? 0) >= 60 ? 'var(--warning)' : 'var(--danger)'
-                  }"></div>
+          <div class="file-entry">
+            <button class="file-row" onclick={() => f.uncovered_lines.length > 0 && toggleFile(f.file_path)}>
+              {#if f.uncovered_lines.length > 0}
+                <span class="file-chevron" class:open={expandedFiles.has(f.file_path)}>&#9654;</span>
+              {:else}
+                <span class="file-chevron-spacer"></span>
+              {/if}
+              <span class="file-path mono">{f.file_path}</span>
+              <div class="file-right">
+                <span class="file-lines mono">{f.lines_covered ?? 0}/{f.lines_total ?? 0}</span>
+                <div class="coverage-bar-wrap">
+                  <div class="coverage-bar"
+                    style="width:{f.coverage_percent ?? 0}%;background:{
+                      (f.coverage_percent ?? 0) >= 80 ? 'var(--success)' :
+                      (f.coverage_percent ?? 0) >= 60 ? 'var(--warning)' : 'var(--danger)'
+                    }"></div>
+                </div>
+                <span class="file-pct">{(f.coverage_percent ?? 0).toFixed(1)}%</span>
               </div>
-              <span class="file-pct">{(f.coverage_percent ?? 0).toFixed(1)}%</span>
-            </div>
+            </button>
+            {#if expandedFiles.has(f.file_path) && f.uncovered_lines.length > 0}
+              <div class="uncovered-lines">
+                <span class="uncovered-label">Uncovered ({f.uncovered_lines.length} lines):</span>
+                <span class="uncovered-ranges mono">{formatLineRanges(f.uncovered_lines)}</span>
+              </div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -247,16 +424,80 @@
   .section { margin-bottom: 1rem; }
   .two-col { display: grid; grid-template-columns: 1fr 1.5fr; gap: 1rem; }
   tr.selected td { background: var(--accent-subtle); }
-  .file-list { max-height: 480px; overflow-y: auto; }
+  .file-list { max-height: 600px; overflow-y: auto; }
+  .file-entry { border-bottom: 1px solid var(--border-subtle); }
+  .file-entry:last-child { border-bottom: none; }
   .file-row {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0.3rem 0.75rem; gap: 0.75rem; border-bottom: 1px solid var(--border-subtle);
+    padding: 0.3rem 0.75rem; gap: 0.5rem; width: 100%;
+    background: none; border: none; cursor: pointer; color: inherit;
+    text-align: left;
   }
-  .file-row:last-child { border-bottom: none; }
+  .file-row:hover { background: var(--bg-muted); }
+  .file-chevron {
+    font-size: 0.5rem; transition: transform 0.15s; display: inline-block;
+    flex-shrink: 0; width: 0.75rem; color: var(--text-muted);
+  }
+  .file-chevron.open { transform: rotate(90deg); }
+  .file-chevron-spacer { width: 0.75rem; flex-shrink: 0; }
   .file-path { font-size: 0.6875rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .file-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+  .file-lines { font-size: 0.625rem; color: var(--text-muted); white-space: nowrap; }
   .coverage-bar-wrap { width: 60px; height: 6px; background: var(--bg-muted); border-radius: 3px; overflow: hidden; }
   .coverage-bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
-  .file-pct { font-size: 0.6875rem; width: 36px; text-align: right; font-weight: 500; }
+  .file-pct { font-size: 0.6875rem; width: 40px; text-align: right; font-weight: 500; }
+  .uncovered-lines {
+    padding: 0.25rem 0.75rem 0.5rem 1.75rem;
+    font-size: 0.6875rem; line-height: 1.5;
+    background: var(--bg-subtle);
+  }
+  .uncovered-label { color: var(--danger); font-weight: 500; margin-right: 0.5rem; }
+  .uncovered-ranges { color: var(--text-secondary); word-break: break-all; }
   @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+  /* Env editor */
+  .env-toggle {
+    background: none; border: none; padding: 0; cursor: pointer;
+    display: flex; align-items: center; gap: 0.5rem;
+    color: var(--text-primary);
+  }
+  .env-toggle:hover h2 { color: var(--accent); }
+  .env-chevron {
+    font-size: 0.625rem; transition: transform 0.15s; display: inline-block;
+  }
+  .env-chevron.open { transform: rotate(90deg); }
+  .env-editor {
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+    color: var(--text-primary);
+    resize: vertical;
+    tab-size: 4;
+    margin-top: 0.5rem;
+  }
+  .env-editor:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .env-actions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+
+  /* Error detail */
+  .error-detail {
+    background: var(--bg-subtle);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+    color: var(--danger);
+  }
 </style>

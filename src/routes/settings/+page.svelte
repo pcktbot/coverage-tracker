@@ -27,21 +27,25 @@
     $repos.filter((r) => r.name.toLowerCase().includes(repoFilter.toLowerCase()))
   );
 
-  onMount(async () => {
-    try {
-      settings = await getSettings();
-      await refreshOrgs();
-      if ($activeOrg) await refreshRepos($activeOrg);
-    } catch (e: any) {
-      error = e.message;
-    }
+  let unlistenSync: (() => void) | null = null;
 
-    // Listen for sync progress events
-    const unlisten = await listen<{ done: number; total: number; name: string }>(
-      'sync-progress',
-      (e) => { syncProgress = e.payload; }
-    );
-    return () => unlisten();
+  onMount(() => {
+    (async () => {
+      try {
+        settings = await getSettings();
+        await refreshOrgs();
+        if ($activeOrg) await refreshRepos($activeOrg);
+      } catch (e: any) {
+        error = e.message;
+      }
+
+      // Listen for sync progress events
+      unlistenSync = await listen<{ done: number; total: number; name: string }>(
+        'sync-progress',
+        (e) => { syncProgress = e.payload; }
+      );
+    })();
+    return () => { unlistenSync?.(); };
   });
 
   async function save() {

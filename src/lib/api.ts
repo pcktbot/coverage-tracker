@@ -42,6 +42,7 @@ export interface FileCoverage {
   coverage_percent?: number;
   lines_covered?: number;
   lines_total?: number;
+  uncovered_lines: number[];
 }
 
 export interface CoverageTrendPoint {
@@ -124,6 +125,17 @@ export async function cloneOrPullRepo(repoId: number): Promise<string> {
   const r: ApiResult<string> = await invoke('clone_or_pull_repo', { repoId });
   if (!r.ok) throw new Error(r.error);
   return r.data!;
+}
+
+export async function readEnvFile(repoId: number): Promise<string> {
+  const r: ApiResult<string> = await invoke('read_env_file', { repoId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function writeEnvFile(repoId: number, content: string): Promise<void> {
+  const r: ApiResult<void> = await invoke('write_env_file', { repoId, content });
+  if (!r.ok) throw new Error(r.error);
 }
 
 // ── Coverage ──────────────────────────────────────────────────────────────────

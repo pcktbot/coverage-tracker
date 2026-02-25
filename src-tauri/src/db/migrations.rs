@@ -54,5 +54,24 @@ pub fn run(conn: &Connection) -> Result<()> {
             ON file_coverage(run_id);
         ",
     )?;
+
+    // Migration: add uncovered_lines column if not present
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(file_coverage)")
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(names.contains(&"uncovered_lines".to_string()))
+        })
+        .unwrap_or(false);
+
+    if !has_col {
+        conn.execute_batch(
+            "ALTER TABLE file_coverage ADD COLUMN uncovered_lines TEXT DEFAULT '[]';"
+        )?;
+    }
+
     Ok(())
 }

@@ -24,17 +24,20 @@
   });
 
   async function loadRunData() {
-    for (const repo of $repos) {
+    // Parallelize all IPC calls to avoid sequential lock contention
+    await Promise.all($repos.map(async (repo) => {
       try {
-        const runs = await listRuns(repo.id);
+        const [runs, trend] = await Promise.all([
+          listRuns(repo.id),
+          getTrend(repo.id, 10),
+        ]);
         const latest = runs.find((r) => r.status === 'success' || r.status === 'failed') ?? runs[0];
         if (latest) {
           latestRuns.update((m) => { m.set(repo.id, latest); return new Map(m); });
         }
-        const trend = await getTrend(repo.id, 10);
         trends.update((m) => { m.set(repo.id, trend); return new Map(m); });
       } catch { /* non-fatal */ }
-    }
+    }));
   }
 
   async function cloneAll() {
@@ -69,9 +72,9 @@
 
   async function runAll() {
     runningAll = true;
-    for (const repo of $enabledRepos) {
-      await runRepo(repo.id);
-    }
+    error = '';
+    const promises = $enabledRepos.map((repo) => runRepo(repo.id));
+    await Promise.allSettled(promises);
     runningAll = false;
   }
 
@@ -155,7 +158,7 @@
             {/if}
           </td>
           <td class="col-actions">
-            <button class="btn-ghost" onclick={() => cloneOrPullRepo(repo.id)} disabled={running}>Pull</button>
+            <button class="btn-ghost" onclick={async () => { await cloneOrPullRepo(repo.id); await refreshRepos($activeOrg ?? undefined); }} disabled={running}>Pull</button>
             <button class="btn-primary" onclick={() => runRepo(repo.id)} disabled={running || !repo.local_path}>
               {running ? 'Running…' : 'Run'}
             </button>

@@ -6,6 +6,7 @@ mod ruby;
 mod simplecov;
 
 use commands::repos::DbState;
+use commands::runner::RunnerState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,7 +23,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(DbState(std::sync::Mutex::new(conn)))
+        .manage(DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))))
+        .manage(RunnerState::new())
         .invoke_handler(tauri::generate_handler![
             // orgs & repos
             commands::repos::list_orgs,
@@ -34,6 +36,8 @@ pub fn run() {
             commands::repos::set_repo_enabled,
             commands::repos::sync_org_repos,
             commands::repos::clone_or_pull_repo,
+            commands::repos::read_env_file,
+            commands::repos::write_env_file,
             // settings
             commands::repos::get_settings,
             commands::repos::save_settings,

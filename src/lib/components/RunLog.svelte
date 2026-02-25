@@ -2,8 +2,12 @@
   import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
 
-  export let repoId: number;
-  export let runId: number | null = null;
+  interface Props {
+    repoId: number;
+    runId?: number | null;
+  }
+
+  let { repoId, runId = null }: Props = $props();
 
   interface LineEvent {
     repo_id: number;
@@ -11,12 +15,12 @@
     line: string;
   }
 
-  let lines: string[] = [];
-  let el: HTMLPreElement;
-  let unlisten: (() => void) | null = null;
+  let lines = $state<string[]>([]);
+  let el = $state<HTMLPreElement | null>(null);
+  let listenPromise: Promise<() => void> | null = null;
 
-  onMount(async () => {
-    unlisten = await listen<LineEvent>('rspec-output', (event) => {
+  onMount(() => {
+    listenPromise = listen<LineEvent>('rspec-output', (event) => {
       if (event.payload.repo_id !== repoId) return;
       if (runId !== null && event.payload.run_id !== runId) return;
       lines = [...lines, event.payload.line];
@@ -28,12 +32,9 @@
   });
 
   onDestroy(() => {
-    unlisten?.();
+    // Ensure listener is cleaned up even if listen() hasn't resolved yet
+    listenPromise?.then((fn) => fn());
   });
-
-  export function clear() {
-    lines = [];
-  }
 </script>
 
 <pre class="run-log" bind:this={el}>{#if lines.length === 0}<span class="text-muted">Waiting for output…</span>{:else}{lines.join('\n')}{/if}</pre>

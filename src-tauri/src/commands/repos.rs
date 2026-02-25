@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, State};
 
-pub struct DbState(pub std::sync::Mutex<rusqlite::Connection>);
+pub struct DbState(pub std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>);
 
 #[derive(Serialize)]
 pub struct ApiResult<T> {
@@ -149,15 +149,67 @@ pub async fn sync_org_repos(
     };
 
     let total = repos.len();
-    let conn = state.0.lock().unwrap();
+    // Hold the DB lock only for the batch insert, wrapped in a transaction.
+    {
+        let conn = state.0.lock().unwrap();
+        let _ = conn.execute_batch("BEGIN");
+        for r in repos.iter() {
+            let _ = db_repos::upsert_repo(&conn, &org, &r.name, &r.clone_url);
+        }
+        let _ = conn.execute_batch("COMMIT");
+    }
+    // Emit progress events after releasing the lock.
     for (i, r) in repos.iter().enumerate() {
-        let _ = db_repos::upsert_repo(&conn, &org, &r.name, &r.clone_url);
         let _ = app.emit(
             "sync-progress",
             serde_json::json!({ "done": i + 1, "total": total, "name": r.name }),
         );
     }
     Ok(ApiResult::ok(total))
+}
+
+/// Read a repo's .env file contents. Returns empty string if the file doesn't exist.
+#[tauri::command]
+pub fn read_env_file(state: State<DbState>, repo_id: i64) -> ApiResult<String> {
+    let conn = state.0.lock().unwrap();
+    let repos = match db_repos::list_repos(&conn, None) {
+        Ok(r) => r,
+        Err(e) => return ApiResult::err(e),
+    };
+    let repo = match repos.into_iter().find(|r| r.id == repo_id) {
+        Some(r) => r,
+        None => return ApiResult::err(format!("Repo {} not found", repo_id)),
+    };
+    let local_path = match &repo.local_path {
+        Some(p) => PathBuf::from(p),
+        None => return ApiResult::err("Repo has not been cloned yet."),
+    };
+    let env_path = local_path.join(".env.test");
+    let content = std::fs::read_to_string(&env_path).unwrap_or_default();
+    ApiResult::ok(content)
+}
+
+/// Write content to a repo's .env.test file.
+#[tauri::command]
+pub fn write_env_file(state: State<DbState>, repo_id: i64, content: String) -> ApiResult<()> {
+    let conn = state.0.lock().unwrap();
+    let repos = match db_repos::list_repos(&conn, None) {
+        Ok(r) => r,
+        Err(e) => return ApiResult::err(e),
+    };
+    let repo = match repos.into_iter().find(|r| r.id == repo_id) {
+        Some(r) => r,
+        None => return ApiResult::err(format!("Repo {} not found", repo_id)),
+    };
+    let local_path = match &repo.local_path {
+        Some(p) => PathBuf::from(p),
+        None => return ApiResult::err("Repo has not been cloned yet."),
+    };
+    let env_path = local_path.join(".env.test");
+    match std::fs::write(&env_path, &content) {
+        Ok(_) => ApiResult::ok(()),
+        Err(e) => ApiResult::err(format!("Failed to write .env.test: {}", e)),
+    }
 }
 
 /// Clone or pull a single repo by its DB id.

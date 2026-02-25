@@ -23,6 +23,7 @@ pub struct FileCoverage {
     pub coverage_percent: Option<f64>,
     pub lines_covered: Option<i64>,
     pub lines_total: Option<i64>,
+    pub uncovered_lines: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,11 +69,13 @@ pub fn insert_file_coverage(
     coverage_percent: Option<f64>,
     lines_covered: Option<i64>,
     lines_total: Option<i64>,
+    uncovered_lines: &[usize],
 ) -> Result<()> {
+    let uncovered_json = serde_json::to_string(uncovered_lines).unwrap_or_else(|_| "[]".to_string());
     conn.execute(
-        "INSERT INTO file_coverage (run_id, file_path, coverage_percent, lines_covered, lines_total)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![run_id, file_path, coverage_percent, lines_covered, lines_total],
+        "INSERT INTO file_coverage (run_id, file_path, coverage_percent, lines_covered, lines_total, uncovered_lines)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![run_id, file_path, coverage_percent, lines_covered, lines_total, uncovered_json],
     )?;
     Ok(())
 }
@@ -121,10 +124,12 @@ pub fn get_trend(conn: &Connection, repo_id: i64, limit: i64) -> Result<Vec<Cove
 
 pub fn get_file_coverage(conn: &Connection, run_id: i64) -> Result<Vec<FileCoverage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, run_id, file_path, coverage_percent, lines_covered, lines_total
+        "SELECT id, run_id, file_path, coverage_percent, lines_covered, lines_total, uncovered_lines
          FROM file_coverage WHERE run_id = ?1 ORDER BY file_path"
     )?;
     let rows = stmt.query_map(params![run_id], |row| {
+        let uncovered_json: String = row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "[]".to_string());
+        let uncovered_lines: Vec<usize> = serde_json::from_str(&uncovered_json).unwrap_or_default();
         Ok(FileCoverage {
             id: row.get(0)?,
             run_id: row.get(1)?,
@@ -132,6 +137,7 @@ pub fn get_file_coverage(conn: &Connection, run_id: i64) -> Result<Vec<FileCover
             coverage_percent: row.get(3)?,
             lines_covered: row.get(4)?,
             lines_total: row.get(5)?,
+            uncovered_lines,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

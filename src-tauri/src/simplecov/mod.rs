@@ -17,6 +17,7 @@ pub struct FileCoverageResult {
     pub coverage_percent: f64,
     pub lines_covered: i64,
     pub lines_total: i64,
+    pub uncovered_lines: Vec<usize>,
 }
 
 /// Parse `coverage/.resultset.json` from the repo root.
@@ -102,11 +103,21 @@ fn parse_json(content: &str) -> Result<CoverageResult> {
         let pct = if lt > 0 { lc as f64 / lt as f64 * 100.0 } else { 0.0 };
         total_covered += lc;
         total_lines += lt;
+
+        // Collect 1-based line numbers where hit count is 0 (uncovered executable lines)
+        let uncovered_lines: Vec<usize> = lines.iter().enumerate()
+            .filter_map(|(i, count)| match count {
+                Some(0) => Some(i + 1), // 1-based line number
+                _ => None,
+            })
+            .collect();
+
         files.push(FileCoverageResult {
             path: path.clone(),
             coverage_percent: pct,
             lines_covered: lc,
             lines_total: lt,
+            uncovered_lines,
         });
     }
 
