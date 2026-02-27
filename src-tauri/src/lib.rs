@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod eol;
 mod git;
 mod github;
 mod istanbul;
@@ -27,6 +28,11 @@ pub fn run() {
     let _ = db::repos::add_org(&conn, "g5components");
     if db::repos::get_active_org(&conn).unwrap_or(None).is_none() {
         let _ = db::repos::set_active_org(&conn, "g5search");
+    }
+
+    // Pre-warm the EOL cache (non-blocking — skips silently on network errors)
+    if let Err(e) = eol::refresh_all_if_stale(&conn) {
+        eprintln!("Warning: initial EOL cache refresh failed: {e}");
     }
 
     tauri::Builder::default()
@@ -60,6 +66,10 @@ pub fn run() {
             commands::coverage::get_file_coverage,
             // export
             commands::export::export_csv,
+            // EOL tracking
+            commands::eol::refresh_eol,
+            commands::eol::check_eol,
+            commands::eol::list_eol_cycles,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

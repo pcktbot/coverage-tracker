@@ -197,3 +197,43 @@ export function downloadCsv(csv: string, filename: string): void {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// ── End-of-life tracking ──────────────────────────────────────────────────────
+
+export interface EolCycle {
+  runtime: string;
+  cycle: string;
+  release_date?: string;
+  eol_date?: string;
+  lts_date?: string;
+  latest?: string;
+  is_eol: boolean;
+}
+
+export interface EolStatus {
+  cycle?: string;
+  is_eol: boolean;
+  eol_date?: string;
+  has_lts: boolean;
+  lts_date?: string;
+}
+
+/** Refresh cached EOL data from endoflife.date (no-ops if <24 h old). */
+export async function refreshEol(): Promise<void> {
+  const r: ApiResult<void> = await invoke('refresh_eol');
+  if (!r.ok) throw new Error(r.error);
+}
+
+/** Check whether a specific runtime version is end-of-life. */
+export async function checkEol(runtime: 'nodejs' | 'ruby', version: string): Promise<EolStatus> {
+  const r: ApiResult<EolStatus> = await invoke('check_eol', { runtime, version });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+/** List all known release cycles for a runtime. */
+export async function listEolCycles(runtime: 'nodejs' | 'ruby'): Promise<EolCycle[]> {
+  const r: ApiResult<EolCycle[]> = await invoke('list_eol_cycles', { runtime });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}

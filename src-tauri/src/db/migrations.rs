@@ -91,5 +91,27 @@ pub fn run(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration: create runtime_eol table for caching end-of-life data
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS runtime_eol (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            runtime      TEXT NOT NULL,          -- 'nodejs' or 'ruby'
+            cycle        TEXT NOT NULL,           -- e.g. '18', '20', '3.1'
+            release_date TEXT,                    -- YYYY-MM-DD
+            eol_date     TEXT,                    -- YYYY-MM-DD or NULL if not yet EOL
+            lts_date     TEXT,                    -- YYYY-MM-DD when LTS started, NULL if never
+            latest       TEXT,                    -- latest patch version in this cycle
+            is_eol       INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(runtime, cycle)
+        );
+
+        CREATE TABLE IF NOT EXISTS runtime_eol_meta (
+            runtime      TEXT PRIMARY KEY,
+            last_fetched TEXT NOT NULL             -- ISO-8601 timestamp of last API fetch
+        );
+        ",
+    )?;
+
     Ok(())
 }
