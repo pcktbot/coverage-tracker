@@ -1,6 +1,8 @@
 use crate::commands::repos::{ApiResult, DbState};
 use crate::db::{coverage as db_cov, repos as db_repos};
 use crate::git as git_ops;
+use crate::istanbul;
+use crate::node::{run_npm_install, run_node_tests};
 use crate::ruby::{run_rspec, run_bundle_install, setup_test_database};
 use crate::simplecov;
 use std::collections::HashSet;
@@ -114,6 +116,12 @@ pub async fn run_coverage(
     let state_inner: Arc<std::sync::Mutex<rusqlite::Connection>> = Arc::clone(&state.0);
     let github_url = repo.github_url.clone();
     let ruby_version = repo.ruby_version.clone();
+    let node_version = repo.node_version.clone();
+
+    // Determine runtime: if there's a Gemfile it's Ruby, if package.json it's Node.
+    // node_version being set is a strong signal too.
+    let is_node = node_version.is_some()
+        || local_path.join("package.json").exists() && !local_path.join("Gemfile").exists();
 
     let result = tokio::task::spawn_blocking(move || {
         let app = app2;
@@ -127,124 +135,10 @@ pub async fn run_coverage(
             }
         }
 
-        // ── Bundle install ────────────────────────────────────────────────
-        let app_bi = app.clone();
-        let bi_result = run_bundle_install(&local_path, ruby_version.as_deref(), move |line| {
-            emit_line(&app_bi, repo_id, run_id, line);
-        });
-        if let Err(e) = bi_result {
-            let msg = format!("bundle install failed: {}", e);
-            let conn = state_inner.lock().unwrap();
-            let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
-            return ApiResult::err(msg);
-        }
-
-        // ── Database setup ────────────────────────────────────────────────
-        let app_db = app.clone();
-        let db_result = setup_test_database(&local_path, ruby_version.as_deref(), move |line| {
-            emit_line(&app_db, repo_id, run_id, line);
-        });
-        if let Err(e) = db_result {
-            let msg = format!("Database setup failed: {}", e);
-            let conn = state_inner.lock().unwrap();
-            let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
-            return ApiResult::err(msg);
-        }
-
-        // ── RSpec ─────────────────────────────────────────────────────────
-        let app_rs = app.clone();
-        let result = run_rspec(&local_path, ruby_version.as_deref(), move |line| {
-            emit_line(&app_rs, repo_id, run_id, line);
-        });
-
-        // Parse SimpleCov BEFORE acquiring the DB lock — this does file I/O
-        // and JSON deserialization which can take seconds for large repos.
-        let cov_result = match &result {
-            Ok(_) => Some(simplecov::parse(&local_path)),
-            Err(_) => None,
-        };
-
-        // Now acquire the DB lock only for the short INSERT/UPDATE operations.
-        // Wrap all writes in a transaction to minimize lock duration.
-        let conn = state_inner.lock().unwrap();
-
-        match result {
-            Ok(rspec) => {
-                let cov_result = cov_result.unwrap(); // always Some when result is Ok
-
-                if rspec.exit_code == 0 {
-                    // All tests passed.
-                    match cov_result {
-                        Ok(cov) => {
-                            let _ = conn.execute_batch("BEGIN");
-                            let _ = db_cov::finish_run(
-                                &conn, run_id, "success", None,
-                                Some(cov.overall_percent),
-                                Some(cov.lines_covered),
-                                Some(cov.lines_total),
-                            );
-                            for f in &cov.files {
-                                let _ = db_cov::insert_file_coverage(
-                                    &conn, run_id, &f.path,
-                                    Some(f.coverage_percent),
-                                    Some(f.lines_covered),
-                                    Some(f.lines_total),
-                                    &f.uncovered_lines,
-                                );
-                            }
-                            let _ = conn.execute_batch("COMMIT");
-                            ApiResult::ok(run_id)
-                        }
-                        Err(e) => {
-                            let msg = format!("RSpec succeeded but SimpleCov parse failed: {}", e);
-                            let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
-                            ApiResult::err(msg)
-                        }
-                    }
-                } else {
-                    // Tests failed (exit code != 0) — still save coverage if available.
-                    let error_detail = if rspec.stderr.is_empty() {
-                        format!("RSpec exited with code {}", rspec.exit_code)
-                    } else {
-                        format!("RSpec exited with code {}:\n{}", rspec.exit_code, rspec.stderr)
-                    };
-
-                    match cov_result {
-                        Ok(cov) => {
-                            // Tests failed but coverage data was collected.
-                            let _ = conn.execute_batch("BEGIN");
-                            let _ = db_cov::finish_run(
-                                &conn, run_id, "failed", Some(&error_detail),
-                                Some(cov.overall_percent),
-                                Some(cov.lines_covered),
-                                Some(cov.lines_total),
-                            );
-                            for f in &cov.files {
-                                let _ = db_cov::insert_file_coverage(
-                                    &conn, run_id, &f.path,
-                                    Some(f.coverage_percent),
-                                    Some(f.lines_covered),
-                                    Some(f.lines_total),
-                                    &f.uncovered_lines,
-                                );
-                            }
-                            let _ = conn.execute_batch("COMMIT");
-                            // Return success so the frontend refreshes coverage data
-                            // even though tests had failures.
-                            ApiResult::ok(run_id)
-                        }
-                        Err(_) => {
-                            let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&error_detail), None, None, None);
-                            ApiResult::err(error_detail)
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
-                ApiResult::err(msg)
-            }
+        if is_node {
+            run_node_pipeline(&app, &state_inner, repo_id, run_id, &local_path, node_version.as_deref())
+        } else {
+            run_ruby_pipeline(&app, &state_inner, repo_id, run_id, &local_path, ruby_version.as_deref())
         }
     })
     .await
@@ -252,4 +146,231 @@ pub async fn run_coverage(
 
     // _in_flight_guard drops here, removing repo_id from in_flight.
     Ok(result)
+}
+
+// ── Ruby pipeline ─────────────────────────────────────────────────────────────
+
+fn run_ruby_pipeline(
+    app: &AppHandle,
+    state_inner: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    repo_id: i64,
+    run_id: i64,
+    local_path: &std::path::Path,
+    ruby_version: Option<&str>,
+) -> ApiResult<i64> {
+    // ── Bundle install ────────────────────────────────────────────────
+    let app_bi = app.clone();
+    let bi_result = run_bundle_install(local_path, ruby_version, move |line| {
+        emit_line(&app_bi, repo_id, run_id, line);
+    });
+    if let Err(e) = bi_result {
+        let msg = format!("bundle install failed: {}", e);
+        let conn = state_inner.lock().unwrap();
+        let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
+        return ApiResult::err(msg);
+    }
+
+    // ── Database setup ────────────────────────────────────────────────
+    let app_db = app.clone();
+    let db_result = setup_test_database(local_path, ruby_version, move |line| {
+        emit_line(&app_db, repo_id, run_id, line);
+    });
+    if let Err(e) = db_result {
+        let msg = format!("Database setup failed: {}", e);
+        let conn = state_inner.lock().unwrap();
+        let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
+        return ApiResult::err(msg);
+    }
+
+    // ── RSpec ─────────────────────────────────────────────────────────
+    let app_rs = app.clone();
+    let result = run_rspec(local_path, ruby_version, move |line| {
+        emit_line(&app_rs, repo_id, run_id, line);
+    });
+
+    // Parse SimpleCov BEFORE acquiring the DB lock
+    let cov_result: Option<Result<CovData, anyhow::Error>> = match &result {
+        Ok(_) => Some(simplecov::parse(local_path).map(CovData::from)),
+        Err(_) => None,
+    };
+
+    let conn = state_inner.lock().unwrap();
+    save_test_result(&conn, repo_id, run_id, result.map(|r| (r.exit_code, r.stderr)), cov_result, "RSpec", "SimpleCov")
+}
+
+// ── Node pipeline ─────────────────────────────────────────────────────────────
+
+fn run_node_pipeline(
+    app: &AppHandle,
+    state_inner: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    repo_id: i64,
+    run_id: i64,
+    local_path: &std::path::Path,
+    node_version: Option<&str>,
+) -> ApiResult<i64> {
+    // ── npm/yarn/pnpm install ─────────────────────────────────────────
+    let app_inst = app.clone();
+    let install_result = run_npm_install(local_path, node_version, move |line| {
+        emit_line(&app_inst, repo_id, run_id, line);
+    });
+    if let Err(e) = install_result {
+        let msg = format!("npm install failed: {}", e);
+        let conn = state_inner.lock().unwrap();
+        let _ = db_cov::finish_run(&conn, run_id, "failed", Some(&msg), None, None, None);
+        return ApiResult::err(msg);
+    }
+
+    // ── Run tests ─────────────────────────────────────────────────────
+    let app_test = app.clone();
+    let result = run_node_tests(local_path, node_version, move |line| {
+        emit_line(&app_test, repo_id, run_id, line);
+    });
+
+    // Parse Istanbul/NYC coverage BEFORE acquiring the DB lock
+    let cov_result: Option<Result<CovData, anyhow::Error>> = match &result {
+        Ok(_) => Some(istanbul::parse(local_path).map(CovData::from)),
+        Err(_) => None,
+    };
+
+    let conn = state_inner.lock().unwrap();
+    save_test_result(&conn, repo_id, run_id, result.map(|r| (r.exit_code, r.stderr)), cov_result, "tests", "coverage")
+}
+
+// ── Shared result saver ───────────────────────────────────────────────────────
+
+/// Save test + coverage results for both Ruby and Node pipelines.
+/// `test_result` is Ok((exit_code, stderr)) or Err.
+/// `cov_result` is the parsed coverage data (if tests ran at all).
+fn save_test_result(
+    conn: &rusqlite::Connection,
+    _repo_id: i64,
+    run_id: i64,
+    test_result: Result<(i32, String), anyhow::Error>,
+    cov_result: Option<Result<CovData, anyhow::Error>>,
+    runner_name: &str,
+    cov_name: &str,
+) -> ApiResult<i64> {
+    match test_result {
+        Ok((exit_code, stderr)) => {
+            let cov_result = cov_result.unwrap(); // always Some when test_result is Ok
+
+            if exit_code == 0 {
+                match cov_result {
+                    Ok(cov) => {
+                        let _ = conn.execute_batch("BEGIN");
+                        let _ = db_cov::finish_run(
+                            conn, run_id, "success", None,
+                            Some(cov.overall_percent),
+                            Some(cov.lines_covered),
+                            Some(cov.lines_total),
+                        );
+                        for f in &cov.files {
+                            let _ = db_cov::insert_file_coverage(
+                                conn, run_id, &f.path,
+                                Some(f.coverage_percent),
+                                Some(f.lines_covered),
+                                Some(f.lines_total),
+                                &f.uncovered_lines,
+                            );
+                        }
+                        let _ = conn.execute_batch("COMMIT");
+                        ApiResult::ok(run_id)
+                    }
+                    Err(e) => {
+                        let msg = format!("{} succeeded but {} parse failed: {}", runner_name, cov_name, e);
+                        let _ = db_cov::finish_run(conn, run_id, "failed", Some(&msg), None, None, None);
+                        ApiResult::err(msg)
+                    }
+                }
+            } else {
+                let error_detail = if stderr.is_empty() {
+                    format!("{} exited with code {}", runner_name, exit_code)
+                } else {
+                    format!("{} exited with code {}:\n{}", runner_name, exit_code, stderr)
+                };
+
+                match cov_result {
+                    Ok(cov) => {
+                        let _ = conn.execute_batch("BEGIN");
+                        let _ = db_cov::finish_run(
+                            conn, run_id, "failed", Some(&error_detail),
+                            Some(cov.overall_percent),
+                            Some(cov.lines_covered),
+                            Some(cov.lines_total),
+                        );
+                        for f in &cov.files {
+                            let _ = db_cov::insert_file_coverage(
+                                conn, run_id, &f.path,
+                                Some(f.coverage_percent),
+                                Some(f.lines_covered),
+                                Some(f.lines_total),
+                                &f.uncovered_lines,
+                            );
+                        }
+                        let _ = conn.execute_batch("COMMIT");
+                        ApiResult::ok(run_id)
+                    }
+                    Err(_) => {
+                        let _ = db_cov::finish_run(conn, run_id, "failed", Some(&error_detail), None, None, None);
+                        ApiResult::err(error_detail)
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = db_cov::finish_run(conn, run_id, "failed", Some(&msg), None, None, None);
+            ApiResult::err(msg)
+        }
+    }
+}
+
+/// Unified coverage data type used by save_test_result.
+struct CovData {
+    overall_percent: f64,
+    lines_covered: i64,
+    lines_total: i64,
+    files: Vec<CovFileData>,
+}
+
+struct CovFileData {
+    path: String,
+    coverage_percent: f64,
+    lines_covered: i64,
+    lines_total: i64,
+    uncovered_lines: Vec<usize>,
+}
+
+impl From<simplecov::CoverageResult> for CovData {
+    fn from(r: simplecov::CoverageResult) -> Self {
+        Self {
+            overall_percent: r.overall_percent,
+            lines_covered: r.lines_covered,
+            lines_total: r.lines_total,
+            files: r.files.into_iter().map(|f| CovFileData {
+                path: f.path,
+                coverage_percent: f.coverage_percent,
+                lines_covered: f.lines_covered,
+                lines_total: f.lines_total,
+                uncovered_lines: f.uncovered_lines,
+            }).collect(),
+        }
+    }
+}
+
+impl From<istanbul::CoverageResult> for CovData {
+    fn from(r: istanbul::CoverageResult) -> Self {
+        Self {
+            overall_percent: r.overall_percent,
+            lines_covered: r.lines_covered,
+            lines_total: r.lines_total,
+            files: r.files.into_iter().map(|f| CovFileData {
+                path: f.path,
+                coverage_percent: f.coverage_percent,
+                lines_covered: f.lines_covered,
+                lines_total: f.lines_total,
+                uncovered_lines: f.uncovered_lines,
+            }).collect(),
+        }
+    }
 }

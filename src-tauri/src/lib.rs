@@ -2,8 +2,11 @@ mod commands;
 mod db;
 mod git;
 mod github;
+mod istanbul;
+mod node;
 mod ruby;
 mod simplecov;
+mod version_manager;
 
 use commands::repos::DbState;
 use commands::runner::RunnerState;
@@ -43,6 +46,7 @@ pub fn run() {
             commands::repos::set_repo_enabled,
             commands::repos::sync_org_repos,
             commands::repos::clone_or_pull_repo,
+            commands::repos::open_in_terminal,
             commands::repos::read_env_file,
             commands::repos::write_env_file,
             // settings

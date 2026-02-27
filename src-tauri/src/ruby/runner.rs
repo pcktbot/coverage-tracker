@@ -6,6 +6,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::version_manager::{Runtime, RuntimeEnv};
+
 #[derive(Debug)]
 pub struct RspecResult {
     pub exit_code: i32,
@@ -46,21 +48,11 @@ where
 
     on_line("[bundle install] running…");
 
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c");
-    cmd.arg("bundle install 2>&1");
-    cmd.current_dir(repo_path);
+    let rt = RuntimeEnv::detect(Runtime::Ruby, ruby_version);
+    on_line(&format!("[bundle install] using {:?} version manager", rt.manager));
+    let mut cmd = rt.bash_command(repo_path, "bundle install");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-
-    if let Some(ver) = ruby_version {
-        cmd.env("RBENV_VERSION", ver);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let shims = format!("{home}/.rbenv/shims:{home}/.rbenv/bin");
-        let existing_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{}:{}", shims, existing_path));
-    }
 
     let mut child = cmd.spawn().map_err(|e| anyhow!("Failed to spawn bundle install: {}", e))?;
     let stdout = child.stdout.take().unwrap();
@@ -95,19 +87,39 @@ where
 {
     let config_dir = repo_path.join("config");
     let db_yml = config_dir.join("database.yml");
-    let db_example = config_dir.join("database.example.yml");
 
-    // If neither file exists, this isn't a Rails app with DB config — skip.
-    if !db_yml.exists() && !db_example.exists() {
-        on_line("[db setup] no database.yml or database.example.yml found — skipping");
+    // Common template names for database.yml across Rails projects.
+    let template_candidates = [
+        "database.example.yml",
+        "database.yml.sample",
+        "database.yml.example",
+        "database.sample.yml",
+    ];
+
+    let db_template = template_candidates
+        .iter()
+        .map(|name| config_dir.join(name))
+        .find(|p| p.exists());
+
+    // If neither database.yml nor any template exists, this isn't a Rails app with DB config — skip.
+    if !db_yml.exists() && db_template.is_none() {
+        on_line("[db setup] no database.yml or template found — skipping");
         return Ok(());
     }
 
-    // Copy example → database.yml if it doesn't exist yet
-    if !db_yml.exists() && db_example.exists() {
-        on_line("[db setup] copying database.example.yml → database.yml");
-        std::fs::copy(&db_example, &db_yml)
-            .map_err(|e| anyhow!("Failed to copy database.example.yml: {}", e))?;
+    // Copy template → database.yml if it doesn't exist yet
+    if !db_yml.exists() {
+        if let Some(ref template) = db_template {
+            let template_name = template.file_name().unwrap().to_string_lossy();
+            on_line(&format!("[db setup] copying {} → database.yml", template_name));
+            std::fs::copy(template, &db_yml)
+                .map_err(|e| anyhow!("Failed to copy {}: {}", template_name, e))?;
+
+            // Patch the username to "postgres" so it works on standard local
+            // setups. Template files often ship with non-standard usernames
+            // like "vagrant" that don't exist on the developer's machine.
+            patch_database_yml_username(&db_yml, &mut on_line);
+        }
     }
 
     // Parse the test database name from database.yml
@@ -165,20 +177,10 @@ where
 
     // ── Run migrations ────────────────────────────────────────────────────
     on_line("[db setup] running migrations…");
-    let mut migrate_cmd = Command::new("bash");
-    migrate_cmd.arg("-c");
-    migrate_cmd.arg("bundle exec rake db:migrate RAILS_ENV=test 2>&1");
-    migrate_cmd.current_dir(repo_path);
+    let rt = RuntimeEnv::detect(Runtime::Ruby, ruby_version);
+    let mut migrate_cmd = rt.bash_command(repo_path, "bundle exec rake db:migrate RAILS_ENV=test");
     migrate_cmd.stdout(Stdio::piped());
     migrate_cmd.stderr(Stdio::piped());
-    if let Some(ver) = ruby_version {
-        migrate_cmd.env("RBENV_VERSION", ver);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let shims = format!("{home}/.rbenv/shims:{home}/.rbenv/bin");
-        let existing_path = std::env::var("PATH").unwrap_or_default();
-        migrate_cmd.env("PATH", format!("{}:{}", shims, existing_path));
-    }
     match migrate_cmd.spawn() {
         Ok(mut child) => {
             if let Some(stdout) = child.stdout.take() {
@@ -229,8 +231,49 @@ fn parse_test_db_name(content: &str) -> Option<String> {
     None
 }
 
+/// Rewrite `username:` values in a freshly-copied database.yml.
+/// Replaces non-standard usernames (e.g. "vagrant") with "postgres" so the
+/// app works out-of-the-box on a typical local PostgreSQL install.
+fn patch_database_yml_username<F>(db_yml: &Path, on_line: &mut F)
+where
+    F: FnMut(&str),
+{
+    const LOCAL_USER: &str = "postgres";
+    // Usernames that are known to not exist on a normal macOS/Linux PG setup.
+    const REPLACE_USERS: &[&str] = &["vagrant", "deploy", "ubuntu"];
+
+    let content = match std::fs::read_to_string(db_yml) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut patched = String::with_capacity(content.len());
+    let mut changed = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("username:") {
+            let old_user = rest.trim();
+            if REPLACE_USERS.iter().any(|u| u.eq_ignore_ascii_case(old_user)) {
+                // Preserve original indentation
+                let indent = &line[..line.len() - line.trim_start().len()];
+                patched.push_str(&format!("{}username: {}\n", indent, LOCAL_USER));
+                changed = true;
+                continue;
+            }
+        }
+        patched.push_str(line);
+        patched.push('\n');
+    }
+
+    if changed {
+        on_line(&format!("[db setup] patched username in database.yml → {}", LOCAL_USER));
+        let _ = std::fs::write(db_yml, patched);
+    }
+}
+
 /// Run `bundle exec rspec` in the given repo directory.
-/// `ruby_version` is the version string from `.ruby-version` (used with rbenv).
+/// `ruby_version` is the version string from `.ruby-version` / `.tool-versions`.
 /// `on_line` is a callback called for each line of stdout/stderr output.
 pub fn run_rspec<F>(
     repo_path: &Path,
@@ -240,48 +283,20 @@ pub fn run_rspec<F>(
 where
     F: FnMut(&str),
 {
-    // Verify rbenv is available
-    let rbenv_path = find_rbenv()?;
-
-    // Check if requested ruby version is installed; surface helpful error if not
-    if let Some(ver) = ruby_version {
-        let installed = rbenv_versions(&rbenv_path)?;
-        if !installed.iter().any(|v| v == ver) {
-            return Err(anyhow!(
-                "Ruby {} is not installed via rbenv.\nRun: rbenv install {}",
-                ver,
-                ver
-            ));
-        }
-    }
+    let rt = RuntimeEnv::detect(Runtime::Ruby, ruby_version);
+    on_line(&format!("[rspec] using {:?} version manager", rt.manager));
 
     // Build the shell command:
     //   set -a; source .env.test; set +a; bundle exec rspec
-    // We use bash -c so we can chain the env loading.
     let env_setup = if repo_path.join(".env.test").exists() {
         "set -a; source .env.test; set +a; "
     } else {
         ""
     };
-    let cmd_str = format!("{}COVERAGE=true bundle exec rspec --format progress 2>&1", env_setup);
+    let shell_cmd = format!("{}COVERAGE=true bundle exec rspec --format progress", env_setup);
 
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c");
-    cmd.arg(&cmd_str);
-    cmd.current_dir(repo_path);
+    let mut cmd = rt.bash_command(repo_path, &shell_cmd);
     cmd.stdout(Stdio::piped());
-
-    // Set RBENV_VERSION so rbenv picks the right ruby without needing `rbenv shell`
-    if let Some(ver) = ruby_version {
-        cmd.env("RBENV_VERSION", ver);
-    }
-
-    // Ensure rbenv shims are on PATH
-    if let Ok(home) = std::env::var("HOME") {
-        let shims = format!("{home}/.rbenv/shims:{home}/.rbenv/bin", home = home);
-        let existing_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{}:{}", shims, existing_path));
-    }
 
     // stderr is already merged into stdout via `2>&1` in the shell command,
     // so we only need to capture stdout. Don't open a separate stderr pipe —
@@ -354,39 +369,4 @@ where
     let stderr = stderr_lines.join("\n");
 
     Ok(RspecResult { exit_code, stderr })
-}
-
-fn find_rbenv() -> Result<String> {
-    // Try common locations
-    let candidates = vec![
-        std::env::var("HOME")
-            .map(|h| format!("{}/.rbenv/bin/rbenv", h))
-            .unwrap_or_default(),
-        "/opt/homebrew/bin/rbenv".to_string(),
-        "/usr/local/bin/rbenv".to_string(),
-    ];
-    for candidate in &candidates {
-        if Path::new(candidate).exists() {
-            return Ok(candidate.clone());
-        }
-    }
-    // Fall back to PATH
-    which("rbenv").ok_or_else(|| {
-        anyhow!("rbenv not found. Please install rbenv: https://github.com/rbenv/rbenv")
-    })
-}
-
-fn rbenv_versions(rbenv: &str) -> Result<Vec<String>> {
-    let output = Command::new(rbenv).arg("versions").arg("--bare").output()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(text.lines().map(|l| l.trim().to_string()).collect())
-}
-
-fn which(cmd: &str) -> Option<String> {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }

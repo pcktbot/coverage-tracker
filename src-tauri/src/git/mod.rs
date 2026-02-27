@@ -60,11 +60,12 @@ fn default_branch_name(repo: &Repository) -> String {
     "main".to_string()
 }
 
-/// Read .ruby-version from repo root, if present.
+/// Read .ruby-version (or .tool-versions) from repo root, if present.
 pub fn read_ruby_version(dest: &Path) -> Option<String> {
-    let path = dest.join(".ruby-version");
-    std::fs::read_to_string(&path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    crate::version_manager::read_ruby_version(dest)
+}
+
+/// Read .node-version, .nvmrc, or .tool-versions from repo root, if present.
+pub fn read_node_version(dest: &Path) -> Option<String> {
+    crate::version_manager::read_node_version(dest)
 }

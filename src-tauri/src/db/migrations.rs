@@ -55,6 +55,24 @@ pub fn run(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    // Migration: add node_version column if not present
+    let has_node_version: bool = conn
+        .prepare("PRAGMA table_info(repos)")
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(names.contains(&"node_version".to_string()))
+        })
+        .unwrap_or(false);
+
+    if !has_node_version {
+        conn.execute_batch(
+            "ALTER TABLE repos ADD COLUMN node_version TEXT;"
+        )?;
+    }
+
     // Migration: add uncovered_lines column if not present
     let has_col: bool = conn
         .prepare("PRAGMA table_info(file_coverage)")

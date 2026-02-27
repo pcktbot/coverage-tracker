@@ -10,6 +10,7 @@ pub struct Repo {
     pub github_url: String,
     pub local_path: Option<String>,
     pub ruby_version: Option<String>,
+    pub node_version: Option<String>,
     pub enabled: bool,
     pub last_synced_at: Option<String>,
 }
@@ -24,14 +25,14 @@ pub struct Org {
 pub fn list_repos(conn: &Connection, org: Option<&str>) -> Result<Vec<Repo>> {
     let rows: Vec<Repo> = if let Some(org) = org {
         let mut stmt = conn.prepare(
-            "SELECT id, org, name, github_url, local_path, ruby_version, enabled, last_synced_at
+            "SELECT id, org, name, github_url, local_path, ruby_version, node_version, enabled, last_synced_at
              FROM repos WHERE org = ?1 ORDER BY name"
         )?;
         let r = stmt.query_map(params![org], map_repo)?.collect::<Result<Vec<_>, _>>()?;
         r
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, org, name, github_url, local_path, ruby_version, enabled, last_synced_at
+            "SELECT id, org, name, github_url, local_path, ruby_version, node_version, enabled, last_synced_at
              FROM repos ORDER BY org, name"
         )?;
         let r = stmt.query_map([], map_repo)?.collect::<Result<Vec<_>, _>>()?;
@@ -48,8 +49,9 @@ fn map_repo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repo> {
         github_url: row.get(3)?,
         local_path: row.get(4)?,
         ruby_version: row.get(5)?,
-        enabled: row.get::<_, i64>(6)? != 0,
-        last_synced_at: row.get(7)?,
+        node_version: row.get(6)?,
+        enabled: row.get::<_, i64>(7)? != 0,
+        last_synced_at: row.get(8)?,
     })
 }
 
@@ -68,11 +70,17 @@ pub fn upsert_repo(conn: &Connection, org: &str, name: &str, github_url: &str) -
     Ok(id)
 }
 
-pub fn update_repo_local_path(conn: &Connection, id: i64, path: &str, ruby_version: Option<&str>) -> Result<()> {
+pub fn update_repo_local_path(
+    conn: &Connection,
+    id: i64,
+    path: &str,
+    ruby_version: Option<&str>,
+    node_version: Option<&str>,
+) -> Result<()> {
     conn.execute(
-        "UPDATE repos SET local_path = ?1, ruby_version = ?2, last_synced_at = datetime('now')
-         WHERE id = ?3",
-        params![path, ruby_version, id],
+        "UPDATE repos SET local_path = ?1, ruby_version = ?2, node_version = ?3, last_synced_at = datetime('now')
+         WHERE id = ?4",
+        params![path, ruby_version, node_version, id],
     )?;
     Ok(())
 }

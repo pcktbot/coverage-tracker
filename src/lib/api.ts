@@ -1,5 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export async function openInTerminal(repoId: number): Promise<void> {
+  const res = await invoke<ApiResult<void>>('open_in_terminal', { repoId });
+  if (!res.ok) throw new Error(res.error ?? 'Failed to open terminal');
+}
+
 export interface ApiResult<T> {
   ok: boolean;
   data?: T;
@@ -19,6 +24,7 @@ export interface Repo {
   github_url: string;
   local_path?: string;
   ruby_version?: string;
+  node_version?: string;
   enabled: boolean;
   last_synced_at?: string;
 }
@@ -28,7 +34,7 @@ export interface CoverageRun {
   repo_id: number;
   started_at: string;
   completed_at?: string;
-  status: 'running' | 'success' | 'failed';
+  status: 'running' | 'success' | 'failed' | 'interrupted';
   error_message?: string;
   overall_coverage?: number;
   lines_covered?: number;

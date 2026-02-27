@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { repos, activeOrg, enabledRepos, refreshRepos } from '$lib/stores/repos';
   import { latestRuns, trends, runningRepos, markRunning, markDone } from '$lib/stores/coverage';
@@ -19,8 +19,11 @@
   let runningAll = $state(false);
   let exporting = $state(false);
 
-  onMount(async () => {
-    await loadRunData();
+  // Reactive: loads coverage data once $repos is populated (avoids race with layout mount)
+  $effect(() => {
+    if ($repos.length > 0) {
+      untrack(() => { loadRunData(); });
+    }
   });
 
   async function loadRunData() {
@@ -31,7 +34,7 @@
           listRuns(repo.id),
           getTrend(repo.id, 10),
         ]);
-        const latest = runs.find((r) => r.status === 'success' || r.status === 'failed') ?? runs[0];
+        const latest = runs.find((r) => r.status !== 'running') ?? runs[0];
         if (latest) {
           latestRuns.update((m) => { m.set(repo.id, latest); return new Map(m); });
         }
@@ -93,6 +96,7 @@
       exporting = false;
     }
   }
+
 </script>
 
 <div class="page-header">
@@ -129,7 +133,7 @@
     <thead>
       <tr>
         <th>Repo</th>
-        <th>Ruby</th>
+        <th>Runtime</th>
         <th class="col-cov">Coverage</th>
         <th class="col-trend">Trend</th>
         <th class="col-status">Status</th>
@@ -141,16 +145,17 @@
         {@const run = $latestRuns.get(repo.id)}
         {@const trend = $trends.get(repo.id) ?? []}
         {@const running = $runningRepos.has(repo.id)}
+        {@const latestPct = trend.length > 0 ? trend[trend.length - 1].overall_coverage : undefined}
         <tr>
           <td>
             <button class="repo-name" onclick={() => goto(`/repo/${repo.id}`)}>{repo.name}</button>
           </td>
-          <td class="text-muted mono" style="font-size:0.75rem">{repo.ruby_version ?? '—'}</td>
-          <td class="col-cov"><CoverageBadge pct={run?.overall_coverage} /></td>
+          <td class="text-muted mono" style="font-size:0.75rem">{repo.node_version ? `node ${repo.node_version}` : repo.ruby_version ? `ruby ${repo.ruby_version}` : '—'}</td>
+          <td class="col-cov"><CoverageBadge pct={latestPct} /></td>
           <td class="col-trend"><TrendSparkline points={trend} width={80} height={24} /></td>
           <td class="col-status">
-            {#if run?.status === 'failed'}
-              <span class="badge badge-red">failed</span>
+            {#if run?.status === 'failed' || run?.status === 'interrupted'}
+              <span class="badge badge-red">{run.status}</span>
             {:else if running}
               <span class="badge badge-yellow">running…</span>
             {:else if run?.status === 'success'}
@@ -177,16 +182,21 @@
 
   .repo-table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 0.875rem;
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
   }
   .repo-table th {
     text-align: left;
     font-size: 0.75rem;
     font-weight: 600;
     color: var(--text-muted);
-    padding: 0 0.75rem 0.5rem;
+    padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border);
+    background: var(--bg-subtle);
     white-space: nowrap;
   }
   .repo-table td {
@@ -194,8 +204,8 @@
     border-bottom: 1px solid var(--border-subtle);
     vertical-align: middle;
   }
+  .repo-table tbody tr:nth-child(even) td { background: var(--bg-subtle); }
   .repo-table tbody tr:last-child td { border-bottom: none; }
-  .repo-table tbody tr:hover td { background: #f7f8fa; }
 
   .repo-name {
     background: none; border: none; padding: 0;

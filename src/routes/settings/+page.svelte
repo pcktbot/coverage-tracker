@@ -232,7 +232,7 @@
           <tr>
             <th>Enabled</th>
             <th>Repository</th>
-            <th>Ruby</th>
+            <th>Runtime</th>
             <th>Local path</th>
           </tr>
         </thead>
@@ -251,7 +251,7 @@
                 </label>
               </td>
               <td style="font-weight:500">{repo.name}</td>
-              <td class="mono text-muted" style="font-size:0.75rem">{repo.ruby_version ?? '—'}</td>
+              <td class="mono text-muted" style="font-size:0.75rem">{repo.node_version ? `node ${repo.node_version}` : repo.ruby_version ? `ruby ${repo.ruby_version}` : '—'}</td>
               <td class="mono text-muted" style="font-size:0.6875rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 {repo.local_path ?? '—'}
               </td>

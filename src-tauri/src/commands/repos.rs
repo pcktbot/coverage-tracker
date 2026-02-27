@@ -4,6 +4,7 @@ use crate::git as git_ops;
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, State};
+use std::process::Command as StdCommand;
 
 pub struct DbState(pub std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>);
 
@@ -239,6 +240,43 @@ pub async fn write_env_file(state: State<'_, DbState>, repo_id: i64, content: St
     }).await
 }
 
+/// Open the repo directory in a new terminal window.
+#[tauri::command]
+pub async fn open_in_terminal(state: State<'_, DbState>, repo_id: i64) -> Result<ApiResult<()>, String> {
+    let local_path = {
+        let conn = state.0.lock().unwrap();
+        let repos = match db_repos::list_repos(&conn, None) {
+            Ok(r) => r,
+            Err(e) => return Ok(ApiResult::err(e)),
+        };
+        let repo = match repos.into_iter().find(|r| r.id == repo_id) {
+            Some(r) => r,
+            None => return Ok(ApiResult::err(format!("Repo {} not found", repo_id))),
+        };
+        match repo.local_path {
+            Some(p) => p,
+            None => return Ok(ApiResult::err("Repo has not been cloned yet.")),
+        }
+    };
+
+    let path = PathBuf::from(&local_path);
+    if !path.exists() {
+        return Ok(ApiResult::err(format!("Directory not found: {}", local_path)));
+    }
+
+    // macOS: open Terminal.app at the repo directory
+    let result = StdCommand::new("open")
+        .arg("-a")
+        .arg("Terminal")
+        .arg(&local_path)
+        .spawn();
+
+    match result {
+        Ok(_) => Ok(ApiResult::ok(())),
+        Err(e) => Ok(ApiResult::err(format!("Failed to open terminal: {}", e))),
+    }
+}
+
 /// Clone or pull a single repo by its DB id.
 #[tauri::command]
 pub async fn clone_or_pull_repo(state: State<'_, DbState>, repo_id: i64) -> Result<ApiResult<String>, String> {
@@ -278,12 +316,14 @@ pub async fn clone_or_pull_repo(state: State<'_, DbState>, repo_id: i64) -> Resu
     }
 
     let ruby_version = git_ops::read_ruby_version(&dest);
+    let node_version = git_ops::read_node_version(&dest);
     let conn = state.0.lock().unwrap();
     if let Err(e) = db_repos::update_repo_local_path(
         &conn,
         repo_id,
         &dest.to_string_lossy(),
         ruby_version.as_deref(),
+        node_version.as_deref(),
     ) {
         return Ok(ApiResult::err(e));
     }

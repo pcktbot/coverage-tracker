@@ -12,6 +12,7 @@
     getFileCoverage,
     runCoverage,
     cloneOrPullRepo,
+    openInTerminal,
     readEnvFile,
     writeEnvFile,
     exportCsv,
@@ -269,7 +270,9 @@
   <div>
     <a href="/" class="back-btn btn-ghost">← Back</a>
     <h1>{repo?.name ?? '…'}</h1>
-    {#if repo?.ruby_version}
+    {#if repo?.node_version}
+      <span class="text-muted mono" style="font-size:0.8125rem">node {repo.node_version}</span>
+    {:else if repo?.ruby_version}
       <span class="text-muted mono" style="font-size:0.8125rem">ruby {repo.ruby_version}</span>
     {/if}
   </div>
@@ -283,6 +286,14 @@
     </button>
     <button class="btn-secondary" onclick={doExport} disabled={exporting}>
       {exporting ? 'Exporting…' : 'Export CSV'}
+    </button>
+    <button
+      class="btn-ghost"
+      title="Open repo directory in Terminal"
+      onclick={() => repo && openInTerminal(repo.id)}
+      disabled={!repo?.local_path}
+    >
+      &#9002; Terminal
     </button>
   </div>
 </div>
