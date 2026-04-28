@@ -52,6 +52,19 @@ pub fn run(conn: &Connection) -> Result<()> {
             ON coverage_runs(repo_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_file_coverage_run
             ON file_coverage(run_id);
+
+        CREATE TABLE IF NOT EXISTS repo_sources (
+            repo_id                   INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+            platform_name             TEXT,
+            tfs_project               TEXT,
+            tfs_area_path             TEXT,
+            tfs_team                  TEXT,
+            tfs_release_definition    TEXT,
+            confluence_space_key      TEXT,
+            confluence_parent_page_id TEXT,
+            confluence_site_label     TEXT,
+            notes                     TEXT
+        );
         ",
     )?;
 

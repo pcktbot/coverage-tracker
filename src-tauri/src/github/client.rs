@@ -20,6 +20,11 @@ pub struct GhRepo {
     pub default_branch: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct GhViewer {
+    login: String,
+}
+
 impl GithubClient {
     pub fn new(token: &str) -> Self {
         let client = reqwest::blocking::Client::builder()
@@ -40,7 +45,22 @@ impl GithubClient {
 
         let status = resp.status();
         if status == 401 || status == 403 {
-            return Err(anyhow!("GitHub auth failed ({}). Check your Personal Access Token in Settings.", status));
+            let sso = resp
+                .headers()
+                .get("x-github-sso")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let msg = if !sso.is_empty() {
+                format!(
+                    "GitHub auth failed ({}). The token appears to need org SSO authorization. GitHub returned x-github-sso: {}.",
+                    status, sso
+                )
+            } else if status == 403 {
+                "GitHub auth failed (403). The token may be missing repo access or may need org SSO authorization.".to_string()
+            } else {
+                format!("GitHub auth failed ({}). Check your Personal Access Token in Settings.", status)
+            };
+            return Err(anyhow!(msg));
         }
         if status == 429 {
             return Err(anyhow!("GitHub API rate limit exceeded. Please wait before retrying."));
@@ -49,6 +69,11 @@ impl GithubClient {
             return Err(anyhow!("GitHub API error: {}", status));
         }
         Ok(resp.json()?)
+    }
+
+    pub fn get_viewer_login(&self) -> Result<String> {
+        let viewer: GhViewer = self.get_json(&format!("{}/user", GITHUB_API))?;
+        Ok(viewer.login)
     }
 
     /// List all non-archived, non-fork repos in an org (fast — no Gemfile checks).
@@ -74,4 +99,3 @@ impl GithubClient {
         Ok(repos)
     }
 }
-

@@ -97,6 +97,47 @@ fn tools_list() -> Value {
                         "repo_name": { "type": "string", "description": "Limit to a specific repo (optional)" }
                     }
                 }
+            },
+            {
+                "name": "list_repo_docs",
+                "description": "List markdown docs for a local repo checkout, with optional runbook-only filtering and text search.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["repo_name"],
+                    "properties": {
+                        "repo_name": { "type": "string", "description": "Repository name" },
+                        "org": { "type": "string", "description": "GitHub org (optional, narrows search)" },
+                        "query": { "type": "string", "description": "Filter docs by path/title/content" },
+                        "runbooks_only": { "type": "boolean", "description": "Limit to likely runbooks" }
+                    }
+                }
+            },
+            {
+                "name": "read_repo_doc",
+                "description": "Read a markdown doc from a local repo checkout.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["repo_name", "path"],
+                    "properties": {
+                        "repo_name": { "type": "string", "description": "Repository name" },
+                        "org": { "type": "string", "description": "GitHub org (optional, narrows search)" },
+                        "path": { "type": "string", "description": "Relative markdown path inside the repo" }
+                    }
+                }
+            },
+            {
+                "name": "search_repo_docs",
+                "description": "Search markdown docs across one repo or all local repos.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["pattern"],
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Text to search within repo docs" },
+                        "repo_name": { "type": "string", "description": "Limit to a single repo (optional)" },
+                        "org": { "type": "string", "description": "GitHub org (optional, narrows repo lookup)" },
+                        "runbooks_only": { "type": "boolean", "description": "Limit to likely runbooks" }
+                    }
+                }
             }
         ]
     })
@@ -109,6 +150,9 @@ fn dispatch_tool(name: &str, args: &Value) -> Result<Value> {
         "get_coverage_summary" => tools::get_coverage_summary(&conn, args),
         "get_coverage_trend" => tools::get_coverage_trend(&conn, args),
         "search_file_coverage" => tools::search_file_coverage(&conn, args),
+        "list_repo_docs" => tools::list_repo_docs(&conn, args),
+        "read_repo_doc" => tools::read_repo_doc(&conn, args),
+        "search_repo_docs" => tools::search_repo_docs(&conn, args),
         _ => anyhow::bail!("Unknown tool: {}", name),
     }
 }

@@ -4,11 +4,20 @@
   import { orgs, activeOrg, repos, refreshOrgs, refreshRepos } from '$lib/stores/repos';
   import {
     getSettings, saveSettings, addOrg, removeOrg, setActiveOrg,
-    syncOrgRepos, setRepoEnabled,
-    type Settings,
+    syncOrgRepos, setRepoEnabled, diagnoseGithubAuth,
+    type Settings, type GithubAuthDiagnostics,
   } from '$lib/api';
 
-  let settings = $state<Settings>({ github_token: '', clone_root: '' });
+  let settings = $state<Settings>({
+    github_token: '',
+    clone_root: '',
+    tfs_base_url: '',
+    tfs_pat: '',
+    tfs_collection: '',
+    confluence_base_url: '',
+    confluence_username: '',
+    confluence_token: '',
+  });
   let saved = $state(false);
   let saving = $state(false);
   let error = $state('');
@@ -22,6 +31,9 @@
   let syncProgress = $state<{ done: number; total: number; name: string } | null>(null);
   let syncError = $state('');
   let togglingId = $state<number | null>(null);
+  let authChecking = $state(false);
+  let authDiagnostics = $state<GithubAuthDiagnostics | null>(null);
+  let authError = $state('');
 
   let filteredRepos = $derived(
     $repos.filter((r) => r.name.toLowerCase().includes(repoFilter.toLowerCase()))
@@ -121,6 +133,18 @@
   function disableAll() {
     filteredRepos.forEach((r) => { if (r.enabled) toggleRepo(r.id, false); });
   }
+
+  async function runAuthCheck() {
+    authChecking = true;
+    authError = '';
+    try {
+      authDiagnostics = await diagnoseGithubAuth($activeOrg ?? undefined);
+    } catch (e: any) {
+      authError = e.message;
+    } finally {
+      authChecking = false;
+    }
+  }
 </script>
 
 <h1 style="margin-bottom:1.5rem">Settings</h1>
@@ -137,8 +161,43 @@
       <label for="token">Personal Access Token</label>
       <input id="token" type="password" bind:value={settings.github_token}
         placeholder="ghp_…" autocomplete="off" />
-      <p class="hint">Needs <code>repo</code> scope to read private repos and Gemfiles.</p>
+      <p class="hint">Needs repo access for the org, and if the org enforces SSO the token must be explicitly authorized there.</p>
     </div>
+    <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <button class="btn-secondary" onclick={runAuthCheck} disabled={authChecking}>
+        {authChecking ? 'Checking…' : 'Run auth check'}
+      </button>
+      {#if authDiagnostics?.org}
+        <span class="text-muted" style="font-size:0.75rem">Target org: {authDiagnostics.org}</span>
+      {/if}
+    </div>
+    {#if authError}
+      <div class="error-msg" style="margin-top:0.75rem">{authError}</div>
+    {/if}
+    {#if authDiagnostics}
+      <div class="auth-results">
+        <div class="auth-row">
+          <div>
+            <strong>GitHub API</strong>
+            <p class="auth-message">{authDiagnostics.api.message}</p>
+            {#if authDiagnostics.api.hint}<p class="hint" style="margin-top:0.35rem">{authDiagnostics.api.hint}</p>{/if}
+          </div>
+          <span class="badge {authDiagnostics.api.ok ? 'badge-green' : authDiagnostics.api.status === 'skipped' ? 'badge-gray' : 'badge-red'}">
+            {authDiagnostics.api.status}
+          </span>
+        </div>
+        <div class="auth-row">
+          <div>
+            <strong>Git HTTPS</strong>
+            <p class="auth-message">{authDiagnostics.git.message}</p>
+            {#if authDiagnostics.git.hint}<p class="hint" style="margin-top:0.35rem">{authDiagnostics.git.hint}</p>{/if}
+          </div>
+          <span class="badge {authDiagnostics.git.ok ? 'badge-green' : authDiagnostics.git.status === 'skipped' ? 'badge-gray' : 'badge-red'}">
+            {authDiagnostics.git.status}
+          </span>
+        </div>
+      </div>
+    {/if}
   </section>
 
   <!-- Clone path -->
@@ -149,6 +208,46 @@
       <input id="clone-root" type="text" bind:value={settings.clone_root}
         placeholder="/Users/you/repos" />
       <p class="hint">Repos will be cloned to <code>&lt;root&gt;/&lt;org&gt;/&lt;repo&gt;</code>.</p>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">TFS / ADO</h2>
+    <div class="form-group">
+      <label for="tfs-base-url">Base URL</label>
+      <input id="tfs-base-url" type="text" bind:value={settings.tfs_base_url}
+        placeholder="https://tfs.internal.example.com/tfs" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-collection">Collection or org</label>
+      <input id="tfs-collection" type="text" bind:value={settings.tfs_collection}
+        placeholder="DefaultCollection" />
+    </div>
+    <div class="form-group" style="margin-bottom:0">
+      <label for="tfs-pat">PAT / access token</label>
+      <input id="tfs-pat" type="password" bind:value={settings.tfs_pat}
+        placeholder="TFS token" autocomplete="off" />
+      <p class="hint">Staged for work items and releases. This is config-only for now.</p>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">Confluence</h2>
+    <div class="form-group">
+      <label for="confluence-base-url">Base URL</label>
+      <input id="confluence-base-url" type="text" bind:value={settings.confluence_base_url}
+        placeholder="https://confluence.internal.example.com" />
+    </div>
+    <div class="form-group">
+      <label for="confluence-username">Username / email</label>
+      <input id="confluence-username" type="text" bind:value={settings.confluence_username}
+        placeholder="name@example.com" />
+    </div>
+    <div class="form-group" style="margin-bottom:0">
+      <label for="confluence-token">Token</label>
+      <input id="confluence-token" type="password" bind:value={settings.confluence_token}
+        placeholder="Confluence token" autocomplete="off" />
+      <p class="hint">Staged for blended views across repo docs and Confluence content.</p>
     </div>
   </section>
 
@@ -275,6 +374,17 @@
     align-items: start;
   }
   .hint { font-size: 0.75rem; color: var(--text-muted); margin: 0.25rem 0 0; }
+  .auth-results { margin-top: 0.9rem; display: grid; gap: 0.75rem; }
+  .auth-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+  }
+  .auth-message { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-secondary); }
   code { font-family: var(--font-mono); background: var(--bg-muted); padding: 0.1em 0.3em; border-radius: 3px; }
   .org-list { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
   .org-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; }

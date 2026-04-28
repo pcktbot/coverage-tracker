@@ -15,6 +15,41 @@ pub struct ApiResult<T> {
     pub error: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct AuthCheck {
+    pub ok: bool,
+    pub status: String,
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GithubAuthDiagnostics {
+    pub token_present: bool,
+    pub org: Option<String>,
+    pub repo: Option<String>,
+    pub api: AuthCheck,
+    pub git: AuthCheck,
+}
+
+#[derive(Serialize)]
+pub struct SettingsPayload {
+    pub github_token: String,
+    pub clone_root: String,
+    pub tfs_base_url: String,
+    pub tfs_pat: String,
+    pub tfs_collection: String,
+    pub confluence_base_url: String,
+    pub confluence_username: String,
+    pub confluence_token: String,
+}
+
+#[derive(Serialize)]
+pub struct RepoBranchState {
+    pub current_branch: String,
+    pub branches: Vec<git_ops::RepoBranch>,
+}
+
 impl<T: Serialize> ApiResult<T> {
     pub fn ok(data: T) -> Self {
         Self { ok: true, data: Some(data), error: None }
@@ -95,14 +130,26 @@ pub async fn get_active_org(state: State<'_, DbState>) -> Result<ApiResult<Optio
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn get_settings(state: State<'_, DbState>) -> Result<ApiResult<serde_json::Value>, String> {
+pub async fn get_settings(state: State<'_, DbState>) -> Result<ApiResult<SettingsPayload>, String> {
     with_db(&state.0, |conn| {
         let token = db_repos::get_setting(conn, "github_token").unwrap_or(None);
         let clone_root = db_repos::get_setting(conn, "clone_root").unwrap_or(None);
-        ApiResult::ok(serde_json::json!({
-            "github_token": token.unwrap_or_default(),
-            "clone_root": clone_root.unwrap_or_default(),
-        }))
+        let tfs_base_url = db_repos::get_setting(conn, "tfs_base_url").unwrap_or(None);
+        let tfs_pat = db_repos::get_setting(conn, "tfs_pat").unwrap_or(None);
+        let tfs_collection = db_repos::get_setting(conn, "tfs_collection").unwrap_or(None);
+        let confluence_base_url = db_repos::get_setting(conn, "confluence_base_url").unwrap_or(None);
+        let confluence_username = db_repos::get_setting(conn, "confluence_username").unwrap_or(None);
+        let confluence_token = db_repos::get_setting(conn, "confluence_token").unwrap_or(None);
+        ApiResult::ok(SettingsPayload {
+            github_token: token.unwrap_or_default(),
+            clone_root: clone_root.unwrap_or_default(),
+            tfs_base_url: tfs_base_url.unwrap_or_default(),
+            tfs_pat: tfs_pat.unwrap_or_default(),
+            tfs_collection: tfs_collection.unwrap_or_default(),
+            confluence_base_url: confluence_base_url.unwrap_or_default(),
+            confluence_username: confluence_username.unwrap_or_default(),
+            confluence_token: confluence_token.unwrap_or_default(),
+        })
     }).await
 }
 
@@ -111,6 +158,12 @@ pub async fn save_settings(
     state: State<'_, DbState>,
     github_token: String,
     clone_root: String,
+    tfs_base_url: String,
+    tfs_pat: String,
+    tfs_collection: String,
+    confluence_base_url: String,
+    confluence_username: String,
+    confluence_token: String,
 ) -> Result<ApiResult<()>, String> {
     with_db(&state.0, move |conn| {
         if let Err(e) = db_repos::set_setting(conn, "github_token", &github_token) {
@@ -119,8 +172,141 @@ pub async fn save_settings(
         if let Err(e) = db_repos::set_setting(conn, "clone_root", &clone_root) {
             return ApiResult::err(e);
         }
+        if let Err(e) = db_repos::set_setting(conn, "tfs_base_url", &tfs_base_url) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "tfs_pat", &tfs_pat) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "tfs_collection", &tfs_collection) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "confluence_base_url", &confluence_base_url) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "confluence_username", &confluence_username) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "confluence_token", &confluence_token) {
+            return ApiResult::err(e);
+        }
         ApiResult::ok(())
     }).await
+}
+
+#[tauri::command]
+pub async fn diagnose_github_auth(
+    state: State<'_, DbState>,
+    org: Option<String>,
+) -> Result<ApiResult<GithubAuthDiagnostics>, String> {
+    let snapshot = with_db(&state.0, move |conn| {
+        let token = db_repos::get_setting(conn, "github_token").unwrap_or(None).unwrap_or_default();
+        let active_org = db_repos::get_active_org(conn).unwrap_or(None);
+        let selected_org = org.or(active_org);
+        let repos = db_repos::list_repos(conn, None).unwrap_or_default();
+        let candidate_repo = repos
+            .iter()
+            .filter(|repo| selected_org.as_ref().map(|org| repo.org == *org).unwrap_or(true))
+            .find(|repo| !repo.github_url.is_empty())
+            .or_else(|| repos.iter().find(|repo| !repo.github_url.is_empty()))
+            .map(|repo| (repo.org.clone(), repo.name.clone(), repo.github_url.clone()));
+        (token, selected_org, candidate_repo)
+    }).await?;
+
+    let (token, selected_org, candidate_repo) = snapshot;
+
+    if token.is_empty() {
+        return Ok(ApiResult::ok(GithubAuthDiagnostics {
+            token_present: false,
+            org: selected_org,
+            repo: candidate_repo.as_ref().map(|(_, name, _)| name.clone()),
+            api: AuthCheck {
+                ok: false,
+                status: "missing_token".into(),
+                message: "No GitHub token is configured.".into(),
+                hint: Some("Add a PAT in Settings, then authorize it for the org if SSO is enforced.".into()),
+            },
+            git: AuthCheck {
+                ok: false,
+                status: "missing_token".into(),
+                message: "Git auth was not tested because no token is configured.".into(),
+                hint: Some("Git HTTPS auth in this app uses the same token as the GitHub API.".into()),
+            },
+        }));
+    }
+
+    let token_for_api = token.clone();
+    let api_org = selected_org.clone();
+    let api_result = tokio::task::spawn_blocking(move || {
+        let client = GithubClient::new(&token_for_api);
+        let viewer = client.get_viewer_login().map_err(|e| e.to_string())?;
+        if let Some(org) = api_org.as_deref() {
+            let repos = client.list_all_repos(org).map_err(|e| e.to_string())?;
+            Ok::<AuthCheck, String>(AuthCheck {
+                ok: true,
+                status: "ok".into(),
+                message: format!("GitHub API auth worked as {viewer}. Org access to {org} returned {} repos.", repos.len()),
+                hint: None,
+            })
+        } else {
+            Ok::<AuthCheck, String>(AuthCheck {
+                ok: true,
+                status: "ok".into(),
+                message: format!("GitHub API auth worked as {viewer}."),
+                hint: None,
+            })
+        }
+    }).await.map_err(|e| e.to_string())?;
+
+    let api = match api_result {
+        Ok(check) => check,
+        Err(err) => AuthCheck {
+            ok: false,
+            status: "failed".into(),
+            message: err,
+            hint: Some("If the org now enforces SSO, confirm the PAT is explicitly authorized for that org.".into()),
+        },
+    };
+
+    let git = if let Some((repo_org, repo_name, repo_url)) = candidate_repo.as_ref() {
+        let token_for_git = token.clone();
+        let repo_url = repo_url.clone();
+        let repo_org = repo_org.clone();
+        let repo_name = repo_name.clone();
+        let git_result = tokio::task::spawn_blocking(move || {
+            git_ops::probe_auth(&repo_url, &token_for_git).map_err(|e| e.to_string())
+        }).await.map_err(|e| e.to_string())?;
+
+        match git_result {
+            Ok(_) => AuthCheck {
+                ok: true,
+                status: "ok".into(),
+                message: format!("Git HTTPS auth succeeded against {repo_org}/{repo_name}."),
+                hint: None,
+            },
+            Err(err) => AuthCheck {
+                ok: false,
+                status: "failed".into(),
+                message: format!("Git HTTPS auth failed against {repo_org}/{repo_name}: {err}"),
+                hint: Some("This app clones over HTTPS with username `x-access-token` and your PAT as the password. SSO authorization failures usually break this path too.".into()),
+            },
+        }
+    } else {
+        AuthCheck {
+            ok: false,
+            status: "skipped".into(),
+            message: "Git auth was not tested because no tracked repo with a GitHub URL was available.".into(),
+            hint: Some("Sync an org first so the app has a repo URL it can probe.".into()),
+        }
+    };
+
+    Ok(ApiResult::ok(GithubAuthDiagnostics {
+        token_present: true,
+        org: selected_org,
+        repo: candidate_repo.map(|(_, name, _)| name),
+        api,
+        git,
+    }))
 }
 
 // ── Repos ─────────────────────────────────────────────────────────────────────
@@ -131,6 +317,126 @@ pub async fn list_repos(state: State<'_, DbState>, org: Option<String>) -> Resul
         match db_repos::list_repos(conn, org.as_deref()) {
             Ok(repos) => ApiResult::ok(repos),
             Err(e) => ApiResult::err(e),
+        }
+    }).await
+}
+
+#[tauri::command]
+pub async fn list_repo_branches(
+    state: State<'_, DbState>,
+    repo_id: i64,
+) -> Result<ApiResult<RepoBranchState>, String> {
+    let (local_path, token) = with_db(&state.0, move |conn| {
+        let repos = match db_repos::list_repos(conn, None) {
+            Ok(r) => r,
+            Err(e) => return Err(e.to_string()),
+        };
+        let repo = repos
+            .into_iter()
+            .find(|repo| repo.id == repo_id)
+            .ok_or_else(|| format!("Repo {repo_id} not found"))?;
+        let local_path = repo
+            .local_path
+            .ok_or_else(|| "Repo has not been cloned yet.".to_string())?;
+        let token = db_repos::get_setting(conn, "github_token")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        Ok::<(String, String), String>((local_path, token))
+    }).await??;
+
+    let result = tokio::task::spawn_blocking(move || {
+        git_ops::list_branches(PathBuf::from(local_path).as_path(), Some(&token))
+            .map(|(current_branch, branches)| RepoBranchState { current_branch, branches })
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?;
+
+    match result {
+        Ok(state) => Ok(ApiResult::ok(state)),
+        Err(err) => Ok(ApiResult::err(err)),
+    }
+}
+
+#[tauri::command]
+pub async fn checkout_repo_branch(
+    state: State<'_, DbState>,
+    repo_id: i64,
+    branch_name: String,
+) -> Result<ApiResult<RepoBranchState>, String> {
+    let (local_path, token) = with_db(&state.0, move |conn| {
+        let repos = match db_repos::list_repos(conn, None) {
+            Ok(r) => r,
+            Err(e) => return Err(e.to_string()),
+        };
+        let repo = repos
+            .into_iter()
+            .find(|repo| repo.id == repo_id)
+            .ok_or_else(|| format!("Repo {repo_id} not found"))?;
+        let local_path = repo
+            .local_path
+            .ok_or_else(|| "Repo has not been cloned yet.".to_string())?;
+        let token = db_repos::get_setting(conn, "github_token")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        Ok::<(String, String), String>((local_path, token))
+    }).await??;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let path = PathBuf::from(local_path);
+        git_ops::checkout_branch(path.as_path(), &branch_name, Some(&token))
+            .and_then(|_| git_ops::list_branches(path.as_path(), Some(&token)))
+            .map(|(current_branch, branches)| RepoBranchState { current_branch, branches })
+            .map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?;
+
+    match result {
+        Ok(state) => Ok(ApiResult::ok(state)),
+        Err(err) => Ok(ApiResult::err(err)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_repo_sources(
+    state: State<'_, DbState>,
+    repo_id: i64,
+) -> Result<ApiResult<db_repos::RepoSources>, String> {
+    with_db(&state.0, move |conn| {
+        match db_repos::get_repo_sources(conn, repo_id) {
+            Ok(sources) => ApiResult::ok(sources),
+            Err(err) => ApiResult::err(err),
+        }
+    }).await
+}
+
+#[tauri::command]
+pub async fn save_repo_sources(
+    state: State<'_, DbState>,
+    repo_id: i64,
+    platform_name: Option<String>,
+    tfs_project: Option<String>,
+    tfs_area_path: Option<String>,
+    tfs_team: Option<String>,
+    tfs_release_definition: Option<String>,
+    confluence_space_key: Option<String>,
+    confluence_parent_page_id: Option<String>,
+    confluence_site_label: Option<String>,
+    notes: Option<String>,
+) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| {
+        let sources = db_repos::RepoSources {
+            repo_id,
+            platform_name,
+            tfs_project,
+            tfs_area_path,
+            tfs_team,
+            tfs_release_definition,
+            confluence_space_key,
+            confluence_parent_page_id,
+            confluence_site_label,
+            notes,
+        };
+        match db_repos::upsert_repo_sources(conn, &sources) {
+            Ok(_) => ApiResult::ok(()),
+            Err(err) => ApiResult::err(err),
         }
     }).await
 }
@@ -192,52 +498,6 @@ pub async fn sync_org_repos(
         );
     }
     Ok(ApiResult::ok(total))
-}
-
-/// Read a repo's .env file contents. Returns empty string if the file doesn't exist.
-#[tauri::command]
-pub async fn read_env_file(state: State<'_, DbState>, repo_id: i64) -> Result<ApiResult<String>, String> {
-    with_db(&state.0, move |conn| {
-        let repos = match db_repos::list_repos(conn, None) {
-            Ok(r) => r,
-            Err(e) => return ApiResult::err(e),
-        };
-        let repo = match repos.into_iter().find(|r| r.id == repo_id) {
-            Some(r) => r,
-            None => return ApiResult::err(format!("Repo {} not found", repo_id)),
-        };
-        let local_path = match &repo.local_path {
-            Some(p) => PathBuf::from(p),
-            None => return ApiResult::err("Repo has not been cloned yet."),
-        };
-        let env_path = local_path.join(".env.test");
-        let content = std::fs::read_to_string(&env_path).unwrap_or_default();
-        ApiResult::ok(content)
-    }).await
-}
-
-/// Write content to a repo's .env.test file.
-#[tauri::command]
-pub async fn write_env_file(state: State<'_, DbState>, repo_id: i64, content: String) -> Result<ApiResult<()>, String> {
-    with_db(&state.0, move |conn| {
-        let repos = match db_repos::list_repos(conn, None) {
-            Ok(r) => r,
-            Err(e) => return ApiResult::err(e),
-        };
-        let repo = match repos.into_iter().find(|r| r.id == repo_id) {
-            Some(r) => r,
-            None => return ApiResult::err(format!("Repo {} not found", repo_id)),
-        };
-        let local_path = match &repo.local_path {
-            Some(p) => PathBuf::from(p),
-            None => return ApiResult::err("Repo has not been cloned yet."),
-        };
-        let env_path = local_path.join(".env.test");
-        match std::fs::write(&env_path, &content) {
-            Ok(_) => ApiResult::ok(()),
-            Err(e) => ApiResult::err(format!("Failed to write .env.test: {}", e)),
-        }
-    }).await
 }
 
 /// Open the repo directory in a new terminal window.

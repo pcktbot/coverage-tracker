@@ -89,6 +89,21 @@
       </div>
     {/if}
 
+    <div class="nav-group">
+      <span class="group-label">Docs</span>
+      <ul class="nav-list">
+        <li>
+          <a
+            href="/docs"
+            class="nav-link"
+            class:active={$page.url.pathname === '/docs'}
+          >
+            Workspace
+          </a>
+        </li>
+      </ul>
+    </div>
+
     <div class="font-size-controls">
       <button
         class="font-btn"

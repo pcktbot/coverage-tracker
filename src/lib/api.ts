@@ -61,6 +61,67 @@ export interface CoverageTrendPoint {
 export interface Settings {
   github_token: string;
   clone_root: string;
+  tfs_base_url: string;
+  tfs_pat: string;
+  tfs_collection: string;
+  confluence_base_url: string;
+  confluence_username: string;
+  confluence_token: string;
+}
+
+export interface RepoDocSummary {
+  path: string;
+  title: string;
+  preview: string;
+  is_runbook: boolean;
+  modified_at?: string;
+}
+
+export interface RepoDocContent {
+  path: string;
+  title: string;
+  markdown: string;
+  is_runbook: boolean;
+  modified_at?: string;
+}
+
+export interface RepoBranch {
+  name: string;
+  is_current: boolean;
+  is_remote: boolean;
+}
+
+export interface RepoBranchState {
+  current_branch: string;
+  branches: RepoBranch[];
+}
+
+export interface AuthCheck {
+  ok: boolean;
+  status: string;
+  message: string;
+  hint?: string;
+}
+
+export interface GithubAuthDiagnostics {
+  token_present: boolean;
+  org?: string;
+  repo?: string;
+  api: AuthCheck;
+  git: AuthCheck;
+}
+
+export interface RepoSources {
+  repo_id: number;
+  platform_name?: string;
+  tfs_project?: string;
+  tfs_area_path?: string;
+  tfs_team?: string;
+  tfs_release_definition?: string;
+  confluence_space_key?: string;
+  confluence_parent_page_id?: string;
+  confluence_site_label?: string;
+  notes?: string;
 }
 
 // ── Orgs ──────────────────────────────────────────────────────────────────────
@@ -104,8 +165,22 @@ export async function saveSettings(s: Settings): Promise<void> {
   const r: ApiResult<void> = await invoke('save_settings', {
     githubToken: s.github_token,
     cloneRoot: s.clone_root,
+    tfsBaseUrl: s.tfs_base_url,
+    tfsPat: s.tfs_pat,
+    tfsCollection: s.tfs_collection,
+    confluenceBaseUrl: s.confluence_base_url,
+    confluenceUsername: s.confluence_username,
+    confluenceToken: s.confluence_token,
   });
   if (!r.ok) throw new Error(r.error);
+}
+
+export async function diagnoseGithubAuth(org?: string): Promise<GithubAuthDiagnostics> {
+  const r: ApiResult<GithubAuthDiagnostics> = await invoke('diagnose_github_auth', {
+    org: org ?? null,
+  });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
 }
 
 // ── Repos ─────────────────────────────────────────────────────────────────────
@@ -133,15 +208,57 @@ export async function cloneOrPullRepo(repoId: number): Promise<string> {
   return r.data!;
 }
 
-export async function readEnvFile(repoId: number): Promise<string> {
-  const r: ApiResult<string> = await invoke('read_env_file', { repoId });
+export async function getRepoSources(repoId: number): Promise<RepoSources> {
+  const r: ApiResult<RepoSources> = await invoke('get_repo_sources', { repoId });
   if (!r.ok) throw new Error(r.error);
   return r.data!;
 }
 
-export async function writeEnvFile(repoId: number, content: string): Promise<void> {
-  const r: ApiResult<void> = await invoke('write_env_file', { repoId, content });
+export async function saveRepoSources(sources: RepoSources): Promise<void> {
+  const r: ApiResult<void> = await invoke('save_repo_sources', {
+    repoId: sources.repo_id,
+    platformName: sources.platform_name ?? null,
+    tfsProject: sources.tfs_project ?? null,
+    tfsAreaPath: sources.tfs_area_path ?? null,
+    tfsTeam: sources.tfs_team ?? null,
+    tfsReleaseDefinition: sources.tfs_release_definition ?? null,
+    confluenceSpaceKey: sources.confluence_space_key ?? null,
+    confluenceParentPageId: sources.confluence_parent_page_id ?? null,
+    confluenceSiteLabel: sources.confluence_site_label ?? null,
+    notes: sources.notes ?? null,
+  });
   if (!r.ok) throw new Error(r.error);
+}
+
+export async function listRepoDocs(
+  repoId: number,
+  options?: { query?: string; runbooksOnly?: boolean },
+): Promise<RepoDocSummary[]> {
+  const r: ApiResult<RepoDocSummary[]> = await invoke('list_repo_docs', {
+    repoId,
+    query: options?.query ?? null,
+    runbooksOnly: options?.runbooksOnly ?? false,
+  });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function readRepoDoc(repoId: number, path: string): Promise<RepoDocContent> {
+  const r: ApiResult<RepoDocContent> = await invoke('read_repo_doc', { repoId, path });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function listRepoBranches(repoId: number): Promise<RepoBranchState> {
+  const r: ApiResult<RepoBranchState> = await invoke('list_repo_branches', { repoId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function checkoutRepoBranch(repoId: number, branchName: string): Promise<RepoBranchState> {
+  const r: ApiResult<RepoBranchState> = await invoke('checkout_repo_branch', { repoId, branchName });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
 }
 
 // ── Coverage ──────────────────────────────────────────────────────────────────

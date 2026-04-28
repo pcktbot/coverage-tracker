@@ -49,15 +49,21 @@ pub fn run() {
             commands::repos::set_active_org,
             commands::repos::get_active_org,
             commands::repos::list_repos,
+            commands::repos::list_repo_branches,
+            commands::repos::checkout_repo_branch,
+            commands::repos::get_repo_sources,
+            commands::repos::save_repo_sources,
             commands::repos::set_repo_enabled,
             commands::repos::sync_org_repos,
             commands::repos::clone_or_pull_repo,
             commands::repos::open_in_terminal,
-            commands::repos::read_env_file,
-            commands::repos::write_env_file,
+            commands::repos::diagnose_github_auth,
             // settings
             commands::repos::get_settings,
             commands::repos::save_settings,
+            // docs
+            commands::docs::list_repo_docs,
+            commands::docs::read_repo_doc,
             // runner
             commands::runner::run_coverage,
             // coverage queries
@@ -74,4 +80,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

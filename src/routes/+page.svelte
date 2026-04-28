@@ -163,6 +163,7 @@
             {/if}
           </td>
           <td class="col-actions">
+            <a class="btn-ghost inline-link-btn" href={`/docs?leftRepo=${repo.id}`}>Docs</a>
             <button class="btn-ghost" onclick={async () => { await cloneOrPullRepo(repo.id); await refreshRepos($activeOrg ?? undefined); }} disabled={running}>Pull</button>
             <button class="btn-primary" onclick={() => runRepo(repo.id)} disabled={running || !repo.local_path}>
               {running ? 'Running…' : 'Run'}
@@ -219,4 +220,15 @@
   .col-status { width: 72px; }
   .col-actions { width: 1px; white-space: nowrap; text-align: right; }
   .col-actions button + button { margin-left: 0.25rem; }
+  .inline-link-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    text-decoration: none;
+  }
+  .inline-link-btn:hover { text-decoration: none; }
 </style>
