@@ -65,6 +65,41 @@ pub fn run(conn: &Connection) -> Result<()> {
             confluence_site_label     TEXT,
             notes                     TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS projects (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT NOT NULL,
+            slug            TEXT NOT NULL UNIQUE,
+            status          TEXT NOT NULL DEFAULT 'incoming',
+            platform_name   TEXT,
+            manual_priority INTEGER NOT NULL DEFAULT 3,
+            notes           TEXT,
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS project_repos (
+            project_id      INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            repo_id         INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, repo_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_profiles (
+            id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                      TEXT NOT NULL,
+            goal                      TEXT NOT NULL DEFAULT '',
+            instructions              TEXT NOT NULL DEFAULT '',
+            source_types              TEXT NOT NULL DEFAULT '[]',
+            project_scope             TEXT NOT NULL DEFAULT 'all_active_projects',
+            weight_manual_priority    INTEGER NOT NULL DEFAULT 5,
+            weight_release_risk       INTEGER NOT NULL DEFAULT 4,
+            weight_doc_gap            INTEGER NOT NULL DEFAULT 2,
+            weight_meeting_followup   INTEGER NOT NULL DEFAULT 3,
+            is_active                 INTEGER NOT NULL DEFAULT 1,
+            created_at                TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at                TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         ",
     )?;
 

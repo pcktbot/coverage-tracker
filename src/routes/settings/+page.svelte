@@ -5,7 +5,8 @@
   import {
     getSettings, saveSettings, addOrg, removeOrg, setActiveOrg,
     syncOrgRepos, setRepoEnabled, diagnoseGithubAuth,
-    type Settings, type GithubAuthDiagnostics,
+    createAgentProfile, deleteAgentProfile, listAgentProfiles, saveAgentProfile,
+    type Settings, type GithubAuthDiagnostics, type AgentProfile,
   } from '$lib/api';
 
   let settings = $state<Settings>({
@@ -34,6 +35,10 @@
   let authChecking = $state(false);
   let authDiagnostics = $state<GithubAuthDiagnostics | null>(null);
   let authError = $state('');
+  let agentProfiles = $state<AgentProfile[]>([]);
+  let newAgentName = $state('');
+  let agentError = $state('');
+  let savingAgentId = $state<number | null>(null);
 
   let filteredRepos = $derived(
     $repos.filter((r) => r.name.toLowerCase().includes(repoFilter.toLowerCase()))
@@ -47,6 +52,7 @@
         settings = await getSettings();
         await refreshOrgs();
         if ($activeOrg) await refreshRepos($activeOrg);
+        agentProfiles = await listAgentProfiles();
       } catch (e: any) {
         error = e.message;
       }
@@ -143,6 +149,41 @@
       authError = e.message;
     } finally {
       authChecking = false;
+    }
+  }
+
+  async function addAgentProfile() {
+    if (!newAgentName.trim()) return;
+    agentError = '';
+    try {
+      await createAgentProfile(newAgentName.trim());
+      agentProfiles = await listAgentProfiles();
+      newAgentName = '';
+    } catch (e: any) {
+      agentError = e.message ?? String(e);
+    }
+  }
+
+  async function persistAgentProfile(profile: AgentProfile) {
+    savingAgentId = profile.id;
+    agentError = '';
+    try {
+      await saveAgentProfile(profile);
+      agentProfiles = await listAgentProfiles();
+    } catch (e: any) {
+      agentError = e.message ?? String(e);
+    } finally {
+      savingAgentId = null;
+    }
+  }
+
+  async function removeAgentProfile(profileId: number) {
+    agentError = '';
+    try {
+      await deleteAgentProfile(profileId);
+      agentProfiles = await listAgentProfiles();
+    } catch (e: any) {
+      agentError = e.message ?? String(e);
     }
   }
 </script>
@@ -280,6 +321,73 @@
       </button>
     </div>
   </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">Agent profiles</h2>
+    {#if agentError}
+      <div class="error-msg" style="margin-bottom:0.75rem">{agentError}</div>
+    {/if}
+    <div class="add-org-row" style="margin-bottom:0.75rem">
+      <input type="text" bind:value={newAgentName} placeholder="Daily Focus"
+        onkeydown={(e) => e.key === 'Enter' && addAgentProfile()} style="flex:1" />
+      <button class="btn-secondary" onclick={addAgentProfile} disabled={!newAgentName.trim()}>
+        Add profile
+      </button>
+    </div>
+    <div class="agent-list">
+      {#each agentProfiles as profile}
+        <div class="agent-card">
+          <div class="agent-card-header">
+            <input bind:value={profile.name} />
+            <label class="toggle-row">
+              <input type="checkbox" bind:checked={profile.is_active} />
+              <span>Active</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for={`agent-goal-${profile.id}`}>Goal</label>
+            <input id={`agent-goal-${profile.id}`} bind:value={profile.goal} placeholder="Rank what needs my attention now." />
+          </div>
+          <div class="form-group">
+            <label for={`agent-instructions-${profile.id}`}>Instructions</label>
+            <textarea id={`agent-instructions-${profile.id}`} class="agent-textarea" bind:value={profile.instructions} rows="3" placeholder="Explain priorities, blockers, and missing context across sources."></textarea>
+          </div>
+          <div class="agent-grid">
+            <div class="form-group">
+              <label for={`agent-scope-${profile.id}`}>Scope</label>
+              <input id={`agent-scope-${profile.id}`} bind:value={profile.project_scope} placeholder="all_active_projects" />
+            </div>
+            <div class="form-group">
+              <label for={`agent-sources-${profile.id}`}>Source types</label>
+              <input id={`agent-sources-${profile.id}`} value={profile.source_types.join(', ')} oninput={(e) => { profile.source_types = (e.currentTarget as HTMLInputElement).value.split(',').map((v) => v.trim()).filter(Boolean); }} placeholder="github, docs, tfs, confluence, meetings" />
+            </div>
+            <div class="form-group">
+              <label for={`agent-manual-weight-${profile.id}`}>Manual priority weight</label>
+              <input id={`agent-manual-weight-${profile.id}`} type="number" bind:value={profile.weight_manual_priority} />
+            </div>
+            <div class="form-group">
+              <label for={`agent-release-weight-${profile.id}`}>Release risk weight</label>
+              <input id={`agent-release-weight-${profile.id}`} type="number" bind:value={profile.weight_release_risk} />
+            </div>
+            <div class="form-group">
+              <label for={`agent-doc-weight-${profile.id}`}>Doc gap weight</label>
+              <input id={`agent-doc-weight-${profile.id}`} type="number" bind:value={profile.weight_doc_gap} />
+            </div>
+            <div class="form-group">
+              <label for={`agent-meeting-weight-${profile.id}`}>Meeting follow-up weight</label>
+              <input id={`agent-meeting-weight-${profile.id}`} type="number" bind:value={profile.weight_meeting_followup} />
+            </div>
+          </div>
+          <div class="agent-actions">
+            <button class="btn-primary" onclick={() => persistAgentProfile(profile)} disabled={savingAgentId === profile.id}>
+              {savingAgentId === profile.id ? 'Saving…' : 'Save profile'}
+            </button>
+            <button class="btn-ghost btn-danger-ghost" onclick={() => removeAgentProfile(profile.id)}>Delete</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+  </section>
 </div>
 
 <div style="margin-top:1.25rem;display:flex;align-items:center;gap:0.75rem">
@@ -390,6 +498,13 @@
   .org-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; }
   .org-name { flex: 1; font-size: 0.875rem; }
   .add-org-row { display: flex; gap: 0.5rem; }
+  .agent-list { display:grid; gap:0.75rem; }
+  .agent-card { border:1px solid var(--border); border-radius:var(--radius-sm); padding:0.75rem; background:var(--bg-subtle); }
+  .agent-card-header { display:flex; justify-content:space-between; gap:0.75rem; margin-bottom:0.75rem; }
+  .agent-grid { display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; }
+  .agent-actions { display:flex; gap:0.5rem; justify-content:flex-end; }
+  .agent-textarea { width:100%; resize:vertical; min-height:90px; padding:0.625rem; border:1px solid var(--border); border-radius:var(--radius-sm); font:inherit; }
+  .toggle-row { display:flex; align-items:center; gap:0.4rem; font-size:0.8125rem; white-space:nowrap; }
   .btn-danger-ghost { color: var(--text-muted); font-size: 0.75rem; }
   .btn-danger-ghost:hover { color: var(--danger); }
 

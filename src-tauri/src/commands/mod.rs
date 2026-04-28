@@ -4,3 +4,4 @@ pub mod coverage;
 pub mod eol;
 pub mod export;
 pub mod docs;
+pub mod projects;

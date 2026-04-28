@@ -90,6 +90,21 @@
     {/if}
 
     <div class="nav-group">
+      <span class="group-label">Projects</span>
+      <ul class="nav-list">
+        <li>
+          <a
+            href="/"
+            class="nav-link"
+            class:active={$page.url.pathname === '/'}
+          >
+            Command Center
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <div class="nav-group">
       <span class="group-label">Docs</span>
       <ul class="nav-list">
         <li>

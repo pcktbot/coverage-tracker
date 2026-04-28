@@ -124,6 +124,45 @@ export interface RepoSources {
   notes?: string;
 }
 
+export interface ProjectSummary {
+  id: number;
+  name: string;
+  slug: string;
+  status: string;
+  platform_name?: string;
+  manual_priority: number;
+  is_active: boolean;
+  repo_count: number;
+  source_link_count: number;
+  focus_score: number;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  slug: string;
+  status: string;
+  platform_name?: string;
+  manual_priority: number;
+  notes?: string;
+  is_active: boolean;
+  linked_repo_ids: number[];
+}
+
+export interface AgentProfile {
+  id: number;
+  name: string;
+  goal: string;
+  instructions: string;
+  source_types: string[];
+  project_scope: string;
+  weight_manual_priority: number;
+  weight_release_risk: number;
+  weight_doc_gap: number;
+  weight_meeting_followup: number;
+  is_active: boolean;
+}
+
 // ── Orgs ──────────────────────────────────────────────────────────────────────
 
 export async function listOrgs(): Promise<Org[]> {
@@ -193,6 +232,72 @@ export async function listRepos(org?: string): Promise<Repo[]> {
 
 export async function setRepoEnabled(id: number, enabled: boolean): Promise<void> {
   const r: ApiResult<void> = await invoke('set_repo_enabled', { id, enabled });
+  if (!r.ok) throw new Error(r.error);
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  const r: ApiResult<ProjectSummary[]> = await invoke('list_projects');
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function getProject(projectId: number): Promise<Project> {
+  const r: ApiResult<Project> = await invoke('get_project', { projectId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function createProject(name: string): Promise<number> {
+  const r: ApiResult<number> = await invoke('create_project', { name });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function saveProject(project: Project): Promise<void> {
+  const r: ApiResult<void> = await invoke('save_project', {
+    projectId: project.id,
+    name: project.name,
+    status: project.status,
+    platformName: project.platform_name ?? null,
+    manualPriority: project.manual_priority,
+    notes: project.notes ?? null,
+    isActive: project.is_active,
+    linkedRepoIds: project.linked_repo_ids,
+  });
+  if (!r.ok) throw new Error(r.error);
+}
+
+export async function listAgentProfiles(): Promise<AgentProfile[]> {
+  const r: ApiResult<AgentProfile[]> = await invoke('list_agent_profiles');
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function createAgentProfile(name: string): Promise<number> {
+  const r: ApiResult<number> = await invoke('create_agent_profile', { name });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function saveAgentProfile(profile: AgentProfile): Promise<void> {
+  const r: ApiResult<void> = await invoke('save_agent_profile', {
+    profileId: profile.id,
+    name: profile.name,
+    goal: profile.goal,
+    instructions: profile.instructions,
+    sourceTypes: profile.source_types,
+    projectScope: profile.project_scope,
+    weightManualPriority: profile.weight_manual_priority,
+    weightReleaseRisk: profile.weight_release_risk,
+    weightDocGap: profile.weight_doc_gap,
+    weightMeetingFollowup: profile.weight_meeting_followup,
+    isActive: profile.is_active,
+  });
+  if (!r.ok) throw new Error(r.error);
+}
+
+export async function deleteAgentProfile(profileId: number): Promise<void> {
+  const r: ApiResult<void> = await invoke('delete_agent_profile', { profileId });
   if (!r.ok) throw new Error(r.error);
 }
 
