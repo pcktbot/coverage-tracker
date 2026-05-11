@@ -3,6 +3,18 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDocRef {
+    pub kind: String,
+    pub label: String,
+    pub github_org: Option<String>,
+    pub github_repo: Option<String>,
+    pub github_branch: Option<String>,
+    pub github_path: Option<String>,
+    pub confluence_space_key: Option<String>,
+    pub confluence_page_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: i64,
     pub name: String,
@@ -11,6 +23,16 @@ pub struct Project {
     pub platform_name: Option<String>,
     pub manual_priority: i64,
     pub notes: Option<String>,
+    pub ado_iteration_path: Option<String>,
+    pub ado_team: Option<String>,
+    pub ado_states: Vec<String>,
+    pub ado_tag: Option<String>,
+    pub doc_refs: Vec<ProjectDocRef>,
+    pub teams_team_id: Option<String>,
+    pub teams_channel_id: Option<String>,
+    pub teams_members: Vec<String>,
+    pub loop_workspace_id: Option<String>,
+    pub loop_page_id: Option<String>,
     pub is_active: bool,
     pub linked_repo_ids: Vec<i64>,
 }
@@ -89,11 +111,16 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
 
 pub fn get_project(conn: &Connection, project_id: i64) -> Result<Project> {
     let project = conn.query_row(
-        "SELECT id, name, slug, status, platform_name, manual_priority, notes, is_active
+        "SELECT id, name, slug, status, platform_name, manual_priority, notes,
+                ado_iteration_path, ado_team, ado_states, ado_tag, repo_links,
+                teams_team_id, teams_channel_id, teams_members, loop_workspace_id, loop_page_id, is_active
          FROM projects
          WHERE id = ?1",
         params![project_id],
         |row| {
+            let ado_states_raw: String = row.get(9)?;
+            let doc_refs_raw: String = row.get(11)?;
+            let teams_members_raw: String = row.get(14)?;
             Ok(Project {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -102,7 +129,17 @@ pub fn get_project(conn: &Connection, project_id: i64) -> Result<Project> {
                 platform_name: row.get(4)?,
                 manual_priority: row.get(5)?,
                 notes: row.get(6)?,
-                is_active: row.get::<_, i64>(7)? != 0,
+                ado_iteration_path: row.get(7)?,
+                ado_team: row.get(8)?,
+                ado_states: serde_json::from_str(&ado_states_raw).unwrap_or_default(),
+                ado_tag: row.get(10)?,
+                doc_refs: serde_json::from_str(&doc_refs_raw).unwrap_or_default(),
+                teams_team_id: row.get(12)?,
+                teams_channel_id: row.get(13)?,
+                teams_members: serde_json::from_str(&teams_members_raw).unwrap_or_default(),
+                loop_workspace_id: row.get(15)?,
+                loop_page_id: row.get(16)?,
+                is_active: row.get::<_, i64>(17)? != 0,
                 linked_repo_ids: Vec::new(),
             })
         },
@@ -133,8 +170,11 @@ pub fn save_project(conn: &Connection, project: &Project) -> Result<()> {
     conn.execute(
         "UPDATE projects
          SET name = ?1, slug = ?2, status = ?3, platform_name = ?4,
-             manual_priority = ?5, notes = ?6, is_active = ?7, updated_at = datetime('now')
-         WHERE id = ?8",
+             manual_priority = ?5, notes = ?6, ado_iteration_path = ?7, ado_team = ?8,
+             ado_states = ?9, ado_tag = ?10, repo_links = ?11, teams_team_id = ?12,
+             teams_channel_id = ?13, teams_members = ?14, loop_workspace_id = ?15,
+             loop_page_id = ?16, is_active = ?17, updated_at = datetime('now')
+         WHERE id = ?18",
         params![
             project.name,
             slugify(&project.name),
@@ -142,6 +182,16 @@ pub fn save_project(conn: &Connection, project: &Project) -> Result<()> {
             project.platform_name,
             project.manual_priority,
             project.notes,
+            project.ado_iteration_path,
+            project.ado_team,
+            serde_json::to_string(&project.ado_states).unwrap_or_else(|_| "[]".into()),
+            project.ado_tag,
+            serde_json::to_string(&project.doc_refs).unwrap_or_else(|_| "[]".into()),
+            project.teams_team_id,
+            project.teams_channel_id,
+            serde_json::to_string(&project.teams_members).unwrap_or_else(|_| "[]".into()),
+            project.loop_workspace_id,
+            project.loop_page_id,
             project.is_active as i64,
             project.id,
         ],
@@ -154,6 +204,16 @@ pub fn save_project(conn: &Connection, project: &Project) -> Result<()> {
             params![project.id, repo_id],
         )?;
     }
+    Ok(())
+}
+
+pub fn update_project_status(conn: &Connection, project_id: i64, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE projects
+         SET status = ?1, updated_at = datetime('now')
+         WHERE id = ?2",
+        params![status, project_id],
+    )?;
     Ok(())
 }
 

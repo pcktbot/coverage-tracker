@@ -39,9 +39,18 @@ pub struct SettingsPayload {
     pub tfs_base_url: String,
     pub tfs_pat: String,
     pub tfs_collection: String,
+    pub tfs_default_project: String,
+    pub tfs_default_area_path: String,
     pub confluence_base_url: String,
     pub confluence_username: String,
     pub confluence_token: String,
+    pub microsoft_tenant_id: String,
+    pub microsoft_client_id: String,
+    pub microsoft_client_secret: String,
+    pub mcp_enabled: bool,
+    pub anthropic_api_key: String,
+    pub anthropic_model: String,
+    pub ai_system_prompt: String,
 }
 
 #[derive(Serialize)]
@@ -137,18 +146,36 @@ pub async fn get_settings(state: State<'_, DbState>) -> Result<ApiResult<Setting
         let tfs_base_url = db_repos::get_setting(conn, "tfs_base_url").unwrap_or(None);
         let tfs_pat = db_repos::get_setting(conn, "tfs_pat").unwrap_or(None);
         let tfs_collection = db_repos::get_setting(conn, "tfs_collection").unwrap_or(None);
+        let tfs_default_project = db_repos::get_setting(conn, "tfs_default_project").unwrap_or(None);
+        let tfs_default_area_path = db_repos::get_setting(conn, "tfs_default_area_path").unwrap_or(None);
         let confluence_base_url = db_repos::get_setting(conn, "confluence_base_url").unwrap_or(None);
         let confluence_username = db_repos::get_setting(conn, "confluence_username").unwrap_or(None);
         let confluence_token = db_repos::get_setting(conn, "confluence_token").unwrap_or(None);
+        let microsoft_tenant_id = db_repos::get_setting(conn, "microsoft_tenant_id").unwrap_or(None);
+        let microsoft_client_id = db_repos::get_setting(conn, "microsoft_client_id").unwrap_or(None);
+        let microsoft_client_secret = db_repos::get_setting(conn, "microsoft_client_secret").unwrap_or(None);
+        let mcp_enabled = db_repos::get_setting(conn, "mcp_enabled").unwrap_or(None);
+        let anthropic_api_key = db_repos::get_setting(conn, "anthropic_api_key").unwrap_or(None);
+        let anthropic_model = db_repos::get_setting(conn, "anthropic_model").unwrap_or(None);
+        let ai_system_prompt = db_repos::get_setting(conn, "ai_system_prompt").unwrap_or(None);
         ApiResult::ok(SettingsPayload {
             github_token: token.unwrap_or_default(),
             clone_root: clone_root.unwrap_or_default(),
             tfs_base_url: tfs_base_url.unwrap_or_default(),
             tfs_pat: tfs_pat.unwrap_or_default(),
             tfs_collection: tfs_collection.unwrap_or_default(),
+            tfs_default_project: tfs_default_project.unwrap_or_else(|| "Consumer Solutions".into()),
+            tfs_default_area_path: tfs_default_area_path.unwrap_or_else(|| "MKT-Websites".into()),
             confluence_base_url: confluence_base_url.unwrap_or_default(),
             confluence_username: confluence_username.unwrap_or_default(),
             confluence_token: confluence_token.unwrap_or_default(),
+            microsoft_tenant_id: microsoft_tenant_id.unwrap_or_default(),
+            microsoft_client_id: microsoft_client_id.unwrap_or_default(),
+            microsoft_client_secret: microsoft_client_secret.unwrap_or_default(),
+            mcp_enabled: mcp_enabled.unwrap_or_else(|| "1".into()) != "0",
+            anthropic_api_key: anthropic_api_key.unwrap_or_default(),
+            anthropic_model: anthropic_model.unwrap_or_else(|| "claude-sonnet-4-5".into()),
+            ai_system_prompt: ai_system_prompt.unwrap_or_else(|| "Focus on prioritization, blockers, missing context, and next checks.".into()),
         })
     }).await
 }
@@ -161,9 +188,18 @@ pub async fn save_settings(
     tfs_base_url: String,
     tfs_pat: String,
     tfs_collection: String,
+    tfs_default_project: String,
+    tfs_default_area_path: String,
     confluence_base_url: String,
     confluence_username: String,
     confluence_token: String,
+    microsoft_tenant_id: String,
+    microsoft_client_id: String,
+    microsoft_client_secret: String,
+    mcp_enabled: bool,
+    anthropic_api_key: String,
+    anthropic_model: String,
+    ai_system_prompt: String,
 ) -> Result<ApiResult<()>, String> {
     with_db(&state.0, move |conn| {
         if let Err(e) = db_repos::set_setting(conn, "github_token", &github_token) {
@@ -181,6 +217,12 @@ pub async fn save_settings(
         if let Err(e) = db_repos::set_setting(conn, "tfs_collection", &tfs_collection) {
             return ApiResult::err(e);
         }
+        if let Err(e) = db_repos::set_setting(conn, "tfs_default_project", &tfs_default_project) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "tfs_default_area_path", &tfs_default_area_path) {
+            return ApiResult::err(e);
+        }
         if let Err(e) = db_repos::set_setting(conn, "confluence_base_url", &confluence_base_url) {
             return ApiResult::err(e);
         }
@@ -188,6 +230,27 @@ pub async fn save_settings(
             return ApiResult::err(e);
         }
         if let Err(e) = db_repos::set_setting(conn, "confluence_token", &confluence_token) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "microsoft_tenant_id", &microsoft_tenant_id) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "microsoft_client_id", &microsoft_client_id) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "microsoft_client_secret", &microsoft_client_secret) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "mcp_enabled", if mcp_enabled { "1" } else { "0" }) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "anthropic_api_key", &anthropic_api_key) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "anthropic_model", &anthropic_model) {
+            return ApiResult::err(e);
+        }
+        if let Err(e) = db_repos::set_setting(conn, "ai_system_prompt", &ai_system_prompt) {
             return ApiResult::err(e);
         }
         ApiResult::ok(())

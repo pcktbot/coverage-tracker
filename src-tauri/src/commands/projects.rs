@@ -43,6 +43,16 @@ pub async fn save_project(
     platform_name: Option<String>,
     manual_priority: i64,
     notes: Option<String>,
+    ado_iteration_path: Option<String>,
+    ado_team: Option<String>,
+    ado_states: Vec<String>,
+    ado_tag: Option<String>,
+    doc_refs: Vec<db_projects::ProjectDocRef>,
+    teams_team_id: Option<String>,
+    teams_channel_id: Option<String>,
+    teams_members: Vec<String>,
+    loop_workspace_id: Option<String>,
+    loop_page_id: Option<String>,
     is_active: bool,
     linked_repo_ids: Vec<i64>,
 ) -> Result<ApiResult<()>, String> {
@@ -55,6 +65,16 @@ pub async fn save_project(
             platform_name,
             manual_priority,
             notes,
+            ado_iteration_path,
+            ado_team,
+            ado_states,
+            ado_tag,
+            doc_refs,
+            teams_team_id,
+            teams_channel_id,
+            teams_members,
+            loop_workspace_id,
+            loop_page_id,
             is_active,
             linked_repo_ids,
         };
@@ -62,6 +82,18 @@ pub async fn save_project(
             Ok(_) => ApiResult::ok(()),
             Err(err) => ApiResult::err(err),
         }
+    }).await
+}
+
+#[tauri::command]
+pub async fn update_project_status(
+    state: State<'_, DbState>,
+    project_id: i64,
+    status: String,
+) -> Result<ApiResult<()>, String> {
+    with_db(&state.0, move |conn| match db_projects::update_project_status(conn, project_id, &status) {
+        Ok(_) => ApiResult::ok(()),
+        Err(err) => ApiResult::err(err),
     }).await
 }
 

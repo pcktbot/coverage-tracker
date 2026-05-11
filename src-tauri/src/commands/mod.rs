@@ -5,3 +5,6 @@ pub mod eol;
 pub mod export;
 pub mod docs;
 pub mod projects;
+pub mod ai;
+pub mod confluence;
+pub mod ado;

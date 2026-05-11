@@ -27,4 +27,4 @@ thiserror = "1"
 anyhow = "1"
 git2 = "0.19"
 dirs = "5"
-
+urlencoding = "2"

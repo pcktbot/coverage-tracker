@@ -2,6 +2,8 @@ mod commands;
 mod db;
 mod eol;
 mod git;
+mod ado;
+mod confluence;
 mod github;
 mod istanbul;
 mod node;
@@ -62,10 +64,22 @@ pub fn run() {
             commands::projects::get_project,
             commands::projects::create_project,
             commands::projects::save_project,
+            commands::projects::update_project_status,
             commands::projects::list_agent_profiles,
             commands::projects::create_agent_profile,
             commands::projects::save_agent_profile,
             commands::projects::delete_agent_profile,
+            commands::ai::send_ai_message,
+            commands::confluence::confluence_get_space,
+            commands::confluence::confluence_get_page,
+            commands::confluence::confluence_search_pages,
+            commands::confluence::confluence_refresh_page,
+            commands::confluence::confluence_get_cached_page,
+            commands::confluence::confluence_list_cached_pages,
+            commands::ado::ado_preview,
+            commands::ado::ado_query_project_work_items,
+            commands::ado::ado_list_release_definitions,
+            commands::ado::ado_list_releases,
             // settings
             commands::repos::get_settings,
             commands::repos::save_settings,

@@ -2,6 +2,7 @@ pub mod migrations;
 pub mod repos;
 pub mod coverage;
 pub mod projects;
+pub mod confluence;
 
 use std::path::PathBuf;
 use rusqlite::Connection;

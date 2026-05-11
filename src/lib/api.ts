@@ -64,9 +64,106 @@ export interface Settings {
   tfs_base_url: string;
   tfs_pat: string;
   tfs_collection: string;
+  tfs_default_project: string;
+  tfs_default_area_path: string;
   confluence_base_url: string;
   confluence_username: string;
   confluence_token: string;
+  microsoft_tenant_id: string;
+  microsoft_client_id: string;
+  microsoft_client_secret: string;
+  mcp_enabled: boolean;
+  anthropic_api_key: string;
+  anthropic_model: string;
+  ai_system_prompt: string;
+}
+
+export interface AIChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ConfluenceSpace {
+  id: string;
+  key: string;
+  name: string;
+  homepage_id?: string;
+}
+
+export interface ConfluencePageSummary {
+  id: string;
+  title: string;
+  space_key?: string;
+  space_name?: string;
+  web_url: string;
+  excerpt: string;
+  last_updated_at?: string;
+}
+
+export interface ConfluencePage {
+  id: string;
+  title: string;
+  space_key?: string;
+  space_name?: string;
+  web_url: string;
+  body_html: string;
+  plain_text: string;
+  excerpt: string;
+  last_updated_at?: string;
+  version_number?: number;
+}
+
+export interface CachedConfluencePage {
+  page_id: string;
+  space_key?: string;
+  title: string;
+  web_url: string;
+  version_number?: number;
+  last_updated_at?: string;
+  last_fetched_at: string;
+  raw_html: string;
+  plain_text: string;
+  excerpt: string;
+}
+
+export interface AdoWorkItem {
+  id: number;
+  title: string;
+  state: string;
+  work_item_type: string;
+  area_path?: string;
+  iteration_path?: string;
+  assigned_to?: string;
+  tags: string[];
+  url: string;
+}
+
+export interface AdoReleaseDefinition {
+  id: number;
+  name: string;
+  path?: string;
+  url?: string;
+}
+
+export interface AdoRelease {
+  id: number;
+  name: string;
+  status?: string;
+  created_on?: string;
+  modified_on?: string;
+  definition_name?: string;
+  web_url?: string;
+}
+
+export interface AdoPreview {
+  base_url: string;
+  collection: string;
+  project: string;
+  area_path: string;
+  api_version: string;
+  work_items: AdoWorkItem[];
+  release_definitions: AdoReleaseDefinition[];
+  releases: AdoRelease[];
 }
 
 export interface RepoDocSummary {
@@ -145,8 +242,29 @@ export interface Project {
   platform_name?: string;
   manual_priority: number;
   notes?: string;
+  ado_iteration_path?: string;
+  ado_team?: string;
+  ado_states: string[];
+  ado_tag?: string;
+  doc_refs: ProjectDocRef[];
+  teams_team_id?: string;
+  teams_channel_id?: string;
+  teams_members: string[];
+  loop_workspace_id?: string;
+  loop_page_id?: string;
   is_active: boolean;
   linked_repo_ids: number[];
+}
+
+export interface ProjectDocRef {
+  kind: string;
+  label: string;
+  github_org?: string;
+  github_repo?: string;
+  github_branch?: string;
+  github_path?: string;
+  confluence_space_key?: string;
+  confluence_page_id?: string;
 }
 
 export interface AgentProfile {
@@ -207,9 +325,18 @@ export async function saveSettings(s: Settings): Promise<void> {
     tfsBaseUrl: s.tfs_base_url,
     tfsPat: s.tfs_pat,
     tfsCollection: s.tfs_collection,
+    tfsDefaultProject: s.tfs_default_project,
+    tfsDefaultAreaPath: s.tfs_default_area_path,
     confluenceBaseUrl: s.confluence_base_url,
     confluenceUsername: s.confluence_username,
     confluenceToken: s.confluence_token,
+    microsoftTenantId: s.microsoft_tenant_id,
+    microsoftClientId: s.microsoft_client_id,
+    microsoftClientSecret: s.microsoft_client_secret,
+    mcpEnabled: s.mcp_enabled,
+    anthropicApiKey: s.anthropic_api_key,
+    anthropicModel: s.anthropic_model,
+    aiSystemPrompt: s.ai_system_prompt,
   });
   if (!r.ok) throw new Error(r.error);
 }
@@ -218,6 +345,86 @@ export async function diagnoseGithubAuth(org?: string): Promise<GithubAuthDiagno
   const r: ApiResult<GithubAuthDiagnostics> = await invoke('diagnose_github_auth', {
     org: org ?? null,
   });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function sendAIMessage(
+  messages: AIChatMessage[],
+  contextLines: string[],
+): Promise<string> {
+  const r: ApiResult<string> = await invoke('send_ai_message', {
+    messages,
+    contextLines,
+  });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function getConfluenceSpace(spaceKey: string): Promise<ConfluenceSpace> {
+  const r: ApiResult<ConfluenceSpace> = await invoke('confluence_get_space', { spaceKey });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function getConfluencePage(pageId: string): Promise<ConfluencePage> {
+  const r: ApiResult<ConfluencePage> = await invoke('confluence_get_page', { pageId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function searchConfluencePages(
+  query: string,
+  spaceKey?: string,
+  limit?: number,
+): Promise<ConfluencePageSummary[]> {
+  const r: ApiResult<ConfluencePageSummary[]> = await invoke('confluence_search_pages', {
+    query,
+    spaceKey: spaceKey ?? null,
+    limit: limit ?? null,
+  });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function refreshConfluencePage(pageId: string): Promise<CachedConfluencePage> {
+  const r: ApiResult<CachedConfluencePage> = await invoke('confluence_refresh_page', { pageId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function adoPreview(): Promise<AdoPreview> {
+  const r: ApiResult<AdoPreview> = await invoke('ado_preview');
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function adoQueryProjectWorkItems(projectId: number): Promise<AdoWorkItem[]> {
+  const r: ApiResult<AdoWorkItem[]> = await invoke('ado_query_project_work_items', { projectId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function adoListReleaseDefinitions(): Promise<AdoReleaseDefinition[]> {
+  const r: ApiResult<AdoReleaseDefinition[]> = await invoke('ado_list_release_definitions');
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function adoListReleases(): Promise<AdoRelease[]> {
+  const r: ApiResult<AdoRelease[]> = await invoke('ado_list_releases');
+  if (!r.ok) throw new Error(r.error);
+  return r.data!;
+}
+
+export async function getCachedConfluencePage(pageId: string): Promise<CachedConfluencePage | null> {
+  const r: ApiResult<CachedConfluencePage | null> = await invoke('confluence_get_cached_page', { pageId });
+  if (!r.ok) throw new Error(r.error);
+  return r.data ?? null;
+}
+
+export async function listCachedConfluencePages(pageIds: string[]): Promise<CachedConfluencePage[]> {
+  const r: ApiResult<CachedConfluencePage[]> = await invoke('confluence_list_cached_pages', { pageIds });
   if (!r.ok) throw new Error(r.error);
   return r.data!;
 }
@@ -261,9 +468,24 @@ export async function saveProject(project: Project): Promise<void> {
     platformName: project.platform_name ?? null,
     manualPriority: project.manual_priority,
     notes: project.notes ?? null,
+    adoIterationPath: project.ado_iteration_path ?? null,
+    adoTeam: project.ado_team ?? null,
+    adoStates: project.ado_states,
+    adoTag: project.ado_tag ?? null,
+    docRefs: project.doc_refs,
+    teamsTeamId: project.teams_team_id ?? null,
+    teamsChannelId: project.teams_channel_id ?? null,
+    teamsMembers: project.teams_members,
+    loopWorkspaceId: project.loop_workspace_id ?? null,
+    loopPageId: project.loop_page_id ?? null,
     isActive: project.is_active,
     linkedRepoIds: project.linked_repo_ids,
   });
+  if (!r.ok) throw new Error(r.error);
+}
+
+export async function updateProjectStatus(projectId: number, status: string): Promise<void> {
+  const r: ApiResult<void> = await invoke('update_project_status', { projectId, status });
   if (!r.ok) throw new Error(r.error);
 }
 
