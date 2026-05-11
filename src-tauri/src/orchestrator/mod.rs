@@ -4,3 +4,4 @@ pub mod state;
 pub mod status;
 pub mod handlers;
 pub mod server;
+pub mod sweeper;
