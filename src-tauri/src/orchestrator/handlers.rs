@@ -1,5 +1,5 @@
 use axum::{Json, extract::State};
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use serde::Deserialize;
 use std::sync::Arc;
 use crate::orchestrator::{
@@ -154,6 +154,46 @@ pub async fn post_inbox(State(state): State<Arc<AppState>>,
     Ok("ok")
 }
 
+pub async fn list_sessions(State(state): State<Arc<AppState>>)
+    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.store.clone();
+    let rows = Store::run(store, |s| s.list_sessions())
+        .await.map_err(internal)?;
+    Ok(Json(serde_json::json!({"sessions": rows})))
+}
+
+#[derive(Deserialize)]
+pub struct SessionQuery { pub session: String, pub limit: Option<i64> }
+
+pub async fn list_events(State(state): State<Arc<AppState>>, Query(q): Query<SessionQuery>)
+    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let limit = q.limit.unwrap_or(200);
+    let store = state.store.clone();
+    let rows = Store::run(store, move |s| s.events_for(&q.session, limit))
+        .await.map_err(internal)?;
+    let events: Vec<_> = rows.into_iter().map(|(id,ts,kind,payload)|
+        serde_json::json!({"id":id,"ts":ts,"kind":kind,"payload":payload})).collect();
+    Ok(Json(serde_json::json!({"events": events})))
+}
+
+pub async fn list_artifacts_h(State(state): State<Arc<AppState>>, Query(q): Query<SessionQuery>)
+    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.store.clone();
+    let rows = Store::run(store, move |s| s.list_artifacts(&q.session))
+        .await.map_err(internal)?;
+    Ok(Json(serde_json::json!({"artifacts": rows})))
+}
+
+pub async fn lookup_by_pid(State(state): State<Arc<AppState>>, Path(pid): Path<i64>)
+    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.store.clone();
+    match Store::run(store, move |s| s.find_session_by_pid(pid))
+        .await.map_err(internal)? {
+        Some(id) => Ok(Json(serde_json::json!({"session_id": id}))),
+        None => Err((axum::http::StatusCode::NOT_FOUND, "no active session for pid".into())),
+    }
+}
+
 pub async fn get_inbox(State(state): State<Arc<AppState>>, Path(sid): Path<String>)
     -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.store.clone();
@@ -274,6 +314,53 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(r2.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(v["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_all() {
+        let (app, state) = test_app();
+        seed(&state, "a"); seed(&state, "b");
+        let resp = app.oneshot(Request::builder().method("GET").uri("/sessions")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["sessions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn events_for_session() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        state.store.record_event("s1", 1, "progress", r#""hi""#).unwrap();
+        let resp = app.oneshot(Request::builder().method("GET").uri("/events?session=s1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert!(v["events"].as_array().unwrap().len() >= 1);
+    }
+
+    #[tokio::test]
+    async fn lookup_session_by_pid() {
+        let (app, state) = test_app();
+        state.store.upsert_session_start("s1", None, "/tmp", 4242, 1).unwrap();
+        let resp = app.oneshot(Request::builder().method("GET").uri("/sessions/by-pid/4242")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(v["session_id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn artifacts_endpoint_returns_list() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        state.store.insert_artifact("s1", 1, "/tmp/a", Some("A")).unwrap();
+        let resp = app.oneshot(Request::builder().method("GET").uri("/artifacts?session=s1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["artifacts"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

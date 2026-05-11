@@ -167,6 +167,37 @@ impl Store {
         }))?.collect();
         rows
     }
+    pub fn list_sessions(&self) -> rusqlite::Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
+                    started_at,updated_at,ended_at,end_reason
+             FROM sessions ORDER BY updated_at DESC")?;
+        let rows: Vec<SessionRow> = stmt.query_map([], |r| Ok(SessionRow {
+            id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
+            status: r.get(4)?, current_tool: r.get(5)?, last_progress: r.get(6)?,
+            last_user_prompt: r.get(7)?, started_at: r.get(8)?, updated_at: r.get(9)?,
+            ended_at: r.get(10)?, end_reason: r.get(11)?,
+        }))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+    pub fn events_for(&self, sid: &str, limit: i64)
+        -> rusqlite::Result<Vec<(i64,i64,String,String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,ts,kind,payload FROM events WHERE session_id=?
+             ORDER BY ts DESC LIMIT ?")?;
+        let rows: Vec<(i64,i64,String,String)> = stmt.query_map(params![sid, limit], |r|
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+    pub fn find_session_by_pid(&self, pid: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id FROM sessions WHERE pid=? AND ended_at IS NULL
+             ORDER BY started_at DESC LIMIT 1",
+            params![pid], |r| r.get::<_, String>(0)).optional()
+    }
     pub fn drain_inbox(&self, sid: &str, now: i64) -> rusqlite::Result<Vec<InboxRow>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
