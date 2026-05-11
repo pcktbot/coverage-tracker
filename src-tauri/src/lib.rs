@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod orchestrator;
 mod eol;
 mod git;
 mod ado;
