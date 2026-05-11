@@ -94,6 +94,38 @@ impl Store {
     pub fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap()
     }
+
+    pub fn record_event(&self, sid: &str, ts: i64, kind: &str, payload: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO events(session_id,ts,kind,payload) VALUES(?,?,?,?)",
+            params![sid, ts, kind, payload])?;
+        Ok(conn.last_insert_rowid())
+    }
+    pub fn apply_status(&self, sid: &str, new_status: &str, now: i64,
+                        ended: Option<(i64, &str)>) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        match ended {
+            Some((ended_at, reason)) => conn.execute(
+                "UPDATE sessions SET status=?, updated_at=?, ended_at=?, end_reason=? WHERE id=?",
+                params![new_status, now, ended_at, reason, sid])?,
+            None => conn.execute(
+                "UPDATE sessions SET status=?, updated_at=? WHERE id=?",
+                params![new_status, now, sid])?,
+        };
+        Ok(())
+    }
+    pub fn set_current_tool(&self, sid: &str, tool: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE sessions SET current_tool=?, updated_at=? WHERE id=?",
+            params![tool, now, sid])?;
+        Ok(())
+    }
+    pub fn set_last_user_prompt(&self, sid: &str, prompt: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE sessions SET last_user_prompt=?, updated_at=? WHERE id=?",
+            params![prompt, now, sid])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
