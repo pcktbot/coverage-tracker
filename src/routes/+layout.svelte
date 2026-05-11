@@ -269,9 +269,9 @@
   });
 
   function viewLabel(pathname: string): string {
-    if (pathname === '/') return 'Command Center';
-    if (pathname === '/dashboard') return 'Coverage Dashboard';
-    if (pathname === '/docs') return 'Docs Workspace';
+    if (pathname === '/') return 'Projects';
+    if (pathname === '/dashboard') return 'Coverage';
+    if (pathname === '/docs') return 'Docs';
     if (pathname === '/settings') return 'Settings';
     if (pathname.startsWith('/projects/')) return 'Project Detail';
     if (pathname.startsWith('/repo/')) return 'Repo Detail';
@@ -309,7 +309,7 @@
             class="nav-link"
             class:active={$page.url.pathname === '/dashboard'}
           >
-            Dashboard
+            Coverage
           </a>
         </li>
         <li>
@@ -318,22 +318,16 @@
             class="nav-link"
             class:active={$page.url.pathname === '/'}
           >
-            Command Center
+            Projects
           </a>
         </li>
-      </ul>
-    </div>
-
-    <div class="nav-group">
-      <span class="group-label">Docs</span>
-      <ul class="nav-list">
         <li>
           <a
             href="/docs"
             class="nav-link"
             class:active={$page.url.pathname === '/docs'}
           >
-            Workspace
+            Docs
           </a>
         </li>
       </ul>
