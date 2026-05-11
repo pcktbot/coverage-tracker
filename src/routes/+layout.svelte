@@ -275,6 +275,7 @@
     if (pathname === '/settings') return 'Settings';
     if (pathname.startsWith('/projects/')) return 'Project Detail';
     if (pathname.startsWith('/repo/')) return 'Repo Detail';
+    if (pathname.startsWith('/sessions')) return 'Sessions';
     return pathname;
   }
 </script>
@@ -328,6 +329,15 @@
             class:active={$page.url.pathname === '/docs'}
           >
             Docs
+          </a>
+        </li>
+        <li>
+          <a
+            href="/sessions"
+            class="nav-link"
+            class:active={$page.url.pathname.startsWith('/sessions')}
+          >
+            Sessions
           </a>
         </li>
       </ul>
