@@ -1,4 +1,5 @@
 use axum::{Json, extract::State};
+use axum::extract::Path;
 use serde::Deserialize;
 use std::sync::Arc;
 use crate::orchestrator::{
@@ -90,6 +91,77 @@ pub async fn post_event(
     Ok("ok")
 }
 
+#[derive(Deserialize)]
+pub struct ProgressBody { pub session_id: String, pub summary: String }
+
+pub async fn post_progress(State(state): State<Arc<AppState>>, Json(b): Json<ProgressBody>)
+    -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    Store::run(store, move |s| -> rusqlite::Result<()> {
+        s.set_last_progress(&b.session_id, &b.summary, ts)?;
+        s.record_event(&b.session_id, ts, "progress",
+            &serde_json::to_string(&b.summary).unwrap_or_default())?;
+        Ok(())
+    }).await.map_err(internal)?;
+    Ok("ok")
+}
+
+#[derive(Deserialize)]
+pub struct ArtifactBody { pub session_id: String, pub path: String, pub label: Option<String> }
+
+pub async fn post_artifact(State(state): State<Arc<AppState>>, Json(b): Json<ArtifactBody>)
+    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    let id = Store::run(store, move |s| -> rusqlite::Result<i64> {
+        let id = s.insert_artifact(&b.session_id, ts, &b.path, b.label.as_deref())?;
+        s.record_event(&b.session_id, ts, "artifact",
+            &serde_json::json!({"id":id,"path":b.path,"label":b.label}).to_string())?;
+        Ok(id)
+    }).await.map_err(internal)?;
+    Ok(Json(serde_json::json!({"id": id})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FromKind { Human, Session }
+
+impl FromKind {
+    fn as_str(&self) -> &'static str {
+        match self { FromKind::Human => "human", FromKind::Session => "session" }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct InboxPostBody {
+    pub from_kind: FromKind,
+    pub from_id: Option<String>,
+    pub message: String,
+}
+
+pub async fn post_inbox(State(state): State<Arc<AppState>>,
+                        Path(sid): Path<String>, Json(b): Json<InboxPostBody>)
+    -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    Store::run(store, move |s| -> rusqlite::Result<()> {
+        s.enqueue_inbox(&sid, b.from_kind.as_str(), b.from_id.as_deref(), ts, &b.message)?;
+        s.record_event(&sid, ts, "inbox_in",
+            &serde_json::json!({"from_kind":b.from_kind.as_str(),"message":b.message}).to_string())?;
+        Ok(())
+    }).await.map_err(internal)?;
+    Ok("ok")
+}
+
+pub async fn get_inbox(State(state): State<Arc<AppState>>, Path(sid): Path<String>)
+    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.store.clone();
+    let msgs = Store::run(store, move |s| s.drain_inbox(&sid, now()))
+        .await.map_err(internal)?;
+    Ok(Json(serde_json::json!({"messages": msgs})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +222,70 @@ mod tests {
         assert_eq!(c.session_id, "s1");
         assert_eq!(c.status, "needs_input");
         assert_eq!(c.label.as_deref(), Some("demo"));
+    }
+
+    #[tokio::test]
+    async fn progress_updates_last_progress() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/progress")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"session_id":"s1","summary":"deployed"}"#))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.store.get_session("s1").unwrap().unwrap().last_progress.as_deref(),
+                   Some("deployed"));
+    }
+
+    #[tokio::test]
+    async fn artifact_returns_id() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/artifact")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"session_id":"s1","path":"https://example.com/pr/1","label":"PR 1"}"#))
+                .unwrap()
+        ).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["id"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn inbox_post_then_get_marks_delivered() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        app.clone().oneshot(
+            Request::builder().method("POST").uri("/inbox/s1")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"from_kind":"human","message":"hi"}"#))
+                .unwrap()
+        ).await.unwrap();
+        let r1 = app.clone().oneshot(Request::builder().method("GET").uri("/inbox/s1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(r1.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"][0]["message"], "hi");
+        let r2 = app.oneshot(Request::builder().method("GET").uri("/inbox/s1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(r2.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn inbox_rejects_unknown_from_kind() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/inbox/s1")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"from_kind":"bogus","message":"x"}"#))
+                .unwrap()
+        ).await.unwrap();
+        assert!(resp.status().is_client_error());
     }
 }

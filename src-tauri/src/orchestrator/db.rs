@@ -128,6 +128,65 @@ impl Store {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ArtifactRow {
+    pub id: i64, pub session_id: String, pub ts: i64,
+    pub path: String, pub label: Option<String>, pub kind: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct InboxRow {
+    pub id: i64, pub from_kind: String, pub from_id: Option<String>,
+    pub ts: i64, pub message: String,
+}
+
+impl Store {
+    pub fn set_last_progress(&self, sid: &str, summary: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE sessions SET last_progress=?, updated_at=? WHERE id=?",
+            params![summary, now, sid])?;
+        Ok(())
+    }
+    pub fn insert_artifact(&self, sid: &str, ts: i64, path: &str, label: Option<&str>)
+        -> rusqlite::Result<i64> {
+        let kind = if path.contains("/pull/") || path.contains("/pulls/") { "pr" }
+                   else if path.starts_with("http") { "url" } else { "file" };
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO artifacts(session_id,ts,path,label,kind) VALUES(?,?,?,?,?)",
+            params![sid, ts, path, label, kind])?;
+        Ok(conn.last_insert_rowid())
+    }
+    pub fn list_artifacts(&self, sid: &str) -> rusqlite::Result<Vec<ArtifactRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,session_id,ts,path,label,kind FROM artifacts
+             WHERE session_id=? ORDER BY ts DESC")?;
+        let rows: rusqlite::Result<Vec<ArtifactRow>> = stmt.query_map(params![sid], |r| Ok(ArtifactRow {
+            id: r.get(0)?, session_id: r.get(1)?, ts: r.get(2)?,
+            path: r.get(3)?, label: r.get(4)?, kind: r.get(5)?,
+        }))?.collect();
+        rows
+    }
+    pub fn drain_inbox(&self, sid: &str, now: i64) -> rusqlite::Result<Vec<InboxRow>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let rows: Vec<InboxRow> = {
+            let mut stmt = tx.prepare(
+                "SELECT id,from_kind,from_id,ts,message FROM inbox
+                 WHERE session_id=? AND delivered_at IS NULL ORDER BY ts ASC")?;
+            let collected: Result<Vec<InboxRow>, rusqlite::Error> = stmt.query_map(params![sid], |r| Ok(InboxRow {
+                id: r.get(0)?, from_kind: r.get(1)?, from_id: r.get(2)?,
+                ts: r.get(3)?, message: r.get(4)?,
+            }))?.collect();
+            collected?
+        };
+        tx.execute("UPDATE inbox SET delivered_at=? WHERE session_id=? AND delivered_at IS NULL",
+            params![now, sid])?;
+        tx.commit()?;
+        Ok(rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
