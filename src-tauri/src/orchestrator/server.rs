@@ -14,3 +14,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/artifacts", get(handlers::list_artifacts_h))
         .with_state(state)
 }
+
+pub async fn spawn_on_random_port(state: Arc<AppState>)
+    -> std::io::Result<(u16, tokio::task::JoinHandle<()>)>
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let app = build_router(state);
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok((port, handle))
+}
+
+pub async fn serve_on(state: Arc<AppState>, addr: &str) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let app = build_router(state);
+    axum::serve(listener, app).await
+}

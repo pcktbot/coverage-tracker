@@ -1,6 +1,6 @@
 mod commands;
 mod db;
-mod orchestrator;
+pub mod orchestrator;
 mod eol;
 mod git;
 mod ado;
@@ -44,6 +44,29 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(DbState(std::sync::Arc::new(std::sync::Mutex::new(conn))))
         .manage(RunnerState::new())
+        .setup(|app| {
+            use std::sync::Arc;
+            use tauri::Manager;
+            use crate::orchestrator::{self, state::AppState, db::Store};
+
+            let app_data_dir = app.path().app_data_dir().expect("app data dir");
+            let db_path = app_data_dir.join("orchestrator.db");
+            let store = Arc::new(Store::open_at(&db_path).expect("open orchestrator db"));
+            let state = AppState::new(store.clone());
+
+            let state_for_server = state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = orchestrator::serve_on(state_for_server, "127.0.0.1:9876").await {
+                    eprintln!("orchestrator server failed: {e}");
+                }
+            });
+
+            // sweeper::spawn already calls tokio::spawn internally; no extra wrap.
+            let _sweeper_handle = orchestrator::sweeper::spawn(store.clone());
+
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // orgs & repos
             commands::repos::list_orgs,
