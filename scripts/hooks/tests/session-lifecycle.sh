@@ -28,4 +28,16 @@ sleep 0.2
 grep -q '"kind":"stop"' "$REC" || { echo "FAIL: stop kind"; exit 1; }
 grep -q '"session_id":"s-test"' "$REC" || { echo "FAIL: stop session_id"; exit 1; }
 
+printf '%s' '{"hook_event_name":"PreToolUse","session_id":"s-test","cwd":"/tmp/work","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+  | "$HOOKS/pre-tool-use.sh"
+sleep 0.2
+grep -q '"kind":"pre_tool_use"' "$REC" || { echo "FAIL: pre_tool_use kind"; exit 1; }
+grep -q '"tool":"Bash"' "$REC" || { echo "FAIL: tool"; exit 1; }
+
+printf '%s' '{"hook_event_name":"Notification","session_id":"s-test","cwd":"/tmp/work","message":"awaiting input","notification_type":"idle_prompt"}' \
+  | "$HOOKS/notification.sh"
+sleep 0.2
+grep -q '"kind":"notification"' "$REC" || { echo "FAIL: notification kind"; exit 1; }
+grep -q '"message":"awaiting input"' "$REC" || { echo "FAIL: message"; exit 1; }
+
 echo "OK"
