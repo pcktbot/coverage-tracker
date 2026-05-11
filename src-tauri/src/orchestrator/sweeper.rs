@@ -18,17 +18,18 @@ pub fn sweep_once(store: &Store, now: i64) -> rusqlite::Result<usize> {
     Ok(changed)
 }
 
-pub fn spawn(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            tick.tick().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-            let s = store.clone();
-            let _ = tokio::task::spawn_blocking(move || sweep_once(&s, now)).await;
-        }
-    })
+/// Async loop that periodically marks stale sessions idle / unknown. Spawn
+/// this via `tauri::async_runtime::spawn` (or any active tokio runtime) —
+/// it does not start its own runtime.
+pub async fn run_loop(store: Arc<Store>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        tick.tick().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let s = store.clone();
+        let _ = tokio::task::spawn_blocking(move || sweep_once(&s, now)).await;
+    }
 }
 
 #[cfg(test)]

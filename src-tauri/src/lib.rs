@@ -65,8 +65,10 @@ pub fn run() {
                 }
             });
 
-            // sweeper::spawn already calls tokio::spawn internally; no extra wrap.
-            let _sweeper_handle = orchestrator::sweeper::spawn(store.clone());
+            let store_for_sweeper = store.clone();
+            tauri::async_runtime::spawn(async move {
+                orchestrator::sweeper::run_loop(store_for_sweeper).await;
+            });
 
             // Tray icon with Show/Quit menu
             let tray_menu = MenuBuilder::new(app)
