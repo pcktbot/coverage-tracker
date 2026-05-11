@@ -1,0 +1,15 @@
+{
+  "_comment": "Reference snippet — merge this into ~/.claude/settings.json. If a hooks.UserPromptSubmit key already exists, append the matcher objects to its array rather than overwriting.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/plan-before-patch.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
