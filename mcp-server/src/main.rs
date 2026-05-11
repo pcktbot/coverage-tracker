@@ -5,6 +5,26 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::sync::{Arc, OnceLock};
+
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static ORCH: OnceLock<Arc<orchestrator::OrchestratorClient>> = OnceLock::new();
+
+fn rt() -> &'static tokio::runtime::Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all().worker_threads(2).build()
+            .expect("build tokio runtime")
+    })
+}
+
+fn orch() -> Arc<orchestrator::OrchestratorClient> {
+    ORCH.get_or_init(|| {
+        let base = std::env::var("ORCHESTRATOR_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:9876".into());
+        Arc::new(orchestrator::OrchestratorClient::new(base))
+    }).clone()
+}
 
 // ── MCP protocol types ────────────────────────────────────────────────────────
 
@@ -127,6 +147,44 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "report_progress",
+                "description": "Append a free-form progress note to this session's timeline.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["summary"],
+                    "properties": { "summary": { "type": "string" } }
+                }
+            },
+            {
+                "name": "attach_artifact",
+                "description": "Register an artifact (file path, URL, or PR link) produced by this session.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "label": { "type": "string" }
+                    }
+                }
+            },
+            {
+                "name": "send_to",
+                "description": "Send a message to another Claude session's inbox.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["sessionId", "message"],
+                    "properties": {
+                        "sessionId": { "type": "string" },
+                        "message": { "type": "string" }
+                    }
+                }
+            },
+            {
+                "name": "check_inbox",
+                "description": "Read and clear this session's pending inbox messages.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
                 "name": "search_repo_docs",
                 "description": "Search markdown docs across one repo or all local repos.",
                 "inputSchema": {
@@ -145,6 +203,45 @@ fn tools_list() -> Value {
 }
 
 fn dispatch_tool(name: &str, args: &Value) -> Result<Value> {
+    // Orchestrator tools — async, bridged via the static runtime. No DB needed.
+    match name {
+        "report_progress" => {
+            let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let client = orch();
+            return Ok(match rt().block_on(client.report_progress(&summary)) {
+                Ok(_) => json!({"ok": true}),
+                Err(_) => json!({"offline": true}),
+            });
+        }
+        "attach_artifact" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let label = args.get("label").and_then(|v| v.as_str()).map(String::from);
+            let client = orch();
+            return Ok(match rt().block_on(client.attach_artifact(&path, label.as_deref())) {
+                Ok(id) => json!({"id": id}),
+                Err(_) => json!({"offline": true}),
+            });
+        }
+        "send_to" => {
+            let sid = args.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let client = orch();
+            return Ok(match rt().block_on(client.send_to(&sid, &msg)) {
+                Ok(_) => json!({"ok": true}),
+                Err(_) => json!({"offline": true}),
+            });
+        }
+        "check_inbox" => {
+            let client = orch();
+            return Ok(match rt().block_on(client.check_inbox()) {
+                Ok(msgs) => json!({"messages": msgs}),
+                Err(_) => json!({"offline": true}),
+            });
+        }
+        _ => {}
+    }
+
+    // Existing read-only DB-backed tools.
     let conn = tools::open_db()?;
     match name {
         "list_repos" => tools::list_repos(&conn, args),

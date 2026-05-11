@@ -87,6 +87,49 @@ impl OrchestratorClient {
             Err(_)  => None,
         }
     }
+
+    pub async fn report_progress(&self, summary: &str)
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let sid = self.session_id().await.ok_or("no session id")?;
+        self.http.post(format!("{}/progress", self.base))
+            .json(&serde_json::json!({"session_id": sid, "summary": summary}))
+            .send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn attach_artifact(&self, path: &str, label: Option<&str>)
+        -> Result<i64, Box<dyn std::error::Error + Send + Sync>>
+    {
+        let sid = self.session_id().await.ok_or("no session id")?;
+        let v: serde_json::Value = self.http.post(format!("{}/artifact", self.base))
+            .json(&serde_json::json!({"session_id": sid, "path": path, "label": label}))
+            .send().await?.error_for_status()?.json().await?;
+        Ok(v["id"].as_i64().unwrap_or(0))
+    }
+
+    pub async fn send_to(&self, target: &str, message: &str)
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let sid = self.session_id().await;
+        self.http.post(format!("{}/inbox/{}", self.base, target))
+            .json(&serde_json::json!({
+                "from_kind": "session",
+                "from_id": sid,
+                "message": message
+            }))
+            .send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn check_inbox(&self)
+        -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        let sid = self.session_id().await.ok_or("no session id")?;
+        let v: serde_json::Value = self.http.get(format!("{}/inbox/{}", self.base, sid))
+            .send().await?.error_for_status()?.json().await?;
+        Ok(v["messages"].as_array().cloned().unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -147,6 +190,134 @@ mod tests {
         );
         let sid = client.resolve_session_for_pid(pid).await.unwrap();
         assert_eq!(sid, "sx");
+        handle.abort();
+    }
+
+    #[derive(Default)]
+    pub struct MockState {
+        pub by_pid: std::collections::HashMap<i64, String>,
+        pub last_progress: std::collections::HashMap<String, String>,
+        pub artifacts: Vec<serde_json::Value>,
+        pub inbox: std::collections::HashMap<String, Vec<serde_json::Value>>,
+        pub next_artifact_id: i64,
+    }
+
+    async fn spawn_mock_full()
+        -> (u16, tokio::task::JoinHandle<()>,
+            std::sync::Arc<std::sync::Mutex<MockState>>)
+    {
+        use axum::{Router, routing::{get, post}, extract::{State, Path, Json as AxJson}, http::StatusCode, Json};
+        use std::sync::{Arc, Mutex};
+
+        type St = Arc<Mutex<MockState>>;
+        let state: St = Arc::new(Mutex::new(MockState::default()));
+
+        async fn by_pid(State(s): State<std::sync::Arc<std::sync::Mutex<MockState>>>, Path(pid): Path<i64>)
+            -> Result<Json<serde_json::Value>, StatusCode>
+        {
+            let g = s.lock().unwrap();
+            match g.by_pid.get(&pid) {
+                Some(sid) => Ok(Json(serde_json::json!({"session_id": sid}))),
+                None => Err(StatusCode::NOT_FOUND),
+            }
+        }
+
+        async fn progress(State(s): State<std::sync::Arc<std::sync::Mutex<MockState>>>, AxJson(body): AxJson<serde_json::Value>)
+            -> &'static str
+        {
+            let mut g = s.lock().unwrap();
+            let sid = body["session_id"].as_str().unwrap_or("").to_string();
+            let sum = body["summary"].as_str().unwrap_or("").to_string();
+            g.last_progress.insert(sid, sum);
+            "ok"
+        }
+
+        async fn artifact(State(s): State<std::sync::Arc<std::sync::Mutex<MockState>>>, AxJson(body): AxJson<serde_json::Value>)
+            -> Json<serde_json::Value>
+        {
+            let mut g = s.lock().unwrap();
+            g.next_artifact_id += 1;
+            let id = g.next_artifact_id;
+            let mut row = body.clone();
+            row["id"] = id.into();
+            g.artifacts.push(row);
+            Json(serde_json::json!({"id": id}))
+        }
+
+        async fn post_inbox(State(s): State<std::sync::Arc<std::sync::Mutex<MockState>>>, Path(sid): Path<String>, AxJson(body): AxJson<serde_json::Value>)
+            -> &'static str
+        {
+            s.lock().unwrap().inbox.entry(sid).or_default().push(body);
+            "ok"
+        }
+
+        async fn get_inbox(State(s): State<std::sync::Arc<std::sync::Mutex<MockState>>>, Path(sid): Path<String>)
+            -> Json<serde_json::Value>
+        {
+            let mut g = s.lock().unwrap();
+            let msgs = g.inbox.remove(&sid).unwrap_or_default();
+            Json(serde_json::json!({"messages": msgs}))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route("/sessions/by-pid/{pid}", get(by_pid))
+            .route("/progress", post(progress))
+            .route("/artifact", post(artifact))
+            .route("/inbox/{sid}", post(post_inbox).get(get_inbox))
+            .with_state(state.clone());
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (port, handle, state)
+    }
+
+    #[tokio::test]
+    async fn report_progress_lands() {
+        let (port, handle, state) = spawn_mock_full().await;
+        let pid = std::process::id() as i64;
+        state.lock().unwrap().by_pid.insert(pid, "sx".into());
+
+        let client = OrchestratorClient::new_with_retry(
+            format!("http://127.0.0.1:{port}"),
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+        );
+        client.report_progress("compiled").await.unwrap();
+        assert_eq!(state.lock().unwrap().last_progress.get("sx").map(String::as_str), Some("compiled"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn attach_artifact_returns_id() {
+        let (port, handle, state) = spawn_mock_full().await;
+        let pid = std::process::id() as i64;
+        state.lock().unwrap().by_pid.insert(pid, "sx".into());
+
+        let client = OrchestratorClient::new_with_retry(
+            format!("http://127.0.0.1:{port}"),
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+        );
+        let id = client.attach_artifact("/tmp/out.txt", Some("out")).await.unwrap();
+        assert!(id > 0);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn send_to_then_check_inbox() {
+        let (port, handle, state) = spawn_mock_full().await;
+        let pid = std::process::id() as i64;
+        state.lock().unwrap().by_pid.insert(pid, "me".into());
+
+        let me = OrchestratorClient::new_with_retry(
+            format!("http://127.0.0.1:{port}"),
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+        );
+        me.send_to("you", "ping").await.unwrap();
+        assert_eq!(state.lock().unwrap().inbox.get("you").map(|v| v.len()).unwrap_or(0), 1);
         handle.abort();
     }
 
