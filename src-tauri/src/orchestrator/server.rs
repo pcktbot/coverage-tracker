@@ -1,8 +1,17 @@
 use axum::{Router, routing::{get, post}};
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use crate::orchestrator::{state::AppState, handlers};
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // Permissive CORS — the orchestrator HTTP server is localhost-only, and
+    // the Tauri webview loads the Svelte app from a different origin, so we
+    // need to allow cross-origin GET/POST from any caller.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         .route("/event", post(handlers::post_event))
         .route("/progress", post(handlers::post_progress))
@@ -13,6 +22,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", get(handlers::list_events))
         .route("/artifacts", get(handlers::list_artifacts_h))
         .with_state(state)
+        .layer(cors)
 }
 
 pub async fn spawn_on_random_port(state: Arc<AppState>)
