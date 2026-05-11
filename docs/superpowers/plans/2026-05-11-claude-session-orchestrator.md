@@ -1210,13 +1210,13 @@ pub fn sweep_once(store: &Store, now: i64) -> rusqlite::Result<usize> {
     let conn = store.lock_conn();
     let mut changed = 0;
     changed += conn.execute(
-        "UPDATE sessions SET status='idle', updated_at=?
+        "UPDATE sessions SET status='idle'
          WHERE status='working' AND ? - updated_at >= ? AND ended_at IS NULL",
-        rusqlite::params![now, now, IDLE_AFTER_SECS])?;
+        rusqlite::params![now, IDLE_AFTER_SECS])?;
     changed += conn.execute(
-        "UPDATE sessions SET status='unknown', updated_at=?
+        "UPDATE sessions SET status='unknown'
          WHERE status IN ('working','idle','needs_input') AND ? - updated_at >= ? AND ended_at IS NULL",
-        rusqlite::params![now, now, UNKNOWN_AFTER_SECS])?;
+        rusqlite::params![now, UNKNOWN_AFTER_SECS])?;
     Ok(changed)
 }
 
