@@ -17,6 +17,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/progress", post(handlers::post_progress))
         .route("/artifact", post(handlers::post_artifact))
         .route("/inbox/{sid}", post(handlers::post_inbox).get(handlers::get_inbox))
+        .route("/inbox/{sid}/ack", post(handlers::ack_inbox))
         .route("/sessions", get(handlers::list_sessions))
         .route("/sessions/by-pid/{pid}", get(handlers::lookup_by_pid))
         .route("/sessions/{sid}/link",

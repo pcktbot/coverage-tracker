@@ -239,6 +239,39 @@ impl Store {
              ORDER BY started_at DESC LIMIT 1",
             params![pid], |r| r.get::<_, String>(0)).optional()
     }
+    /// Returns pending inbox messages WITHOUT marking delivered.
+    pub fn peek_inbox(&self, sid: &str) -> rusqlite::Result<Vec<InboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,from_kind,from_id,ts,message FROM inbox
+             WHERE session_id=? AND delivered_at IS NULL ORDER BY ts ASC")?;
+        let rows: Vec<InboxRow> = stmt.query_map(params![sid], |r| Ok(InboxRow {
+            id: r.get(0)?, from_kind: r.get(1)?, from_id: r.get(2)?,
+            ts: r.get(3)?, message: r.get(4)?,
+        }))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+
+    /// Mark the given inbox IDs as delivered. Idempotent — unknown/already-delivered IDs are no-ops.
+    pub fn ack_inbox(&self, sid: &str, ids: &[i64], now: i64) -> rusqlite::Result<usize> {
+        if ids.is_empty() { return Ok(0); }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "UPDATE inbox SET delivered_at=? WHERE session_id=? AND id IN ({}) AND delivered_at IS NULL",
+            placeholders);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Integer(now),
+            rusqlite::types::Value::Text(sid.to_string()),
+        ];
+        for id in ids {
+            params_vec.push(rusqlite::types::Value::Integer(*id));
+        }
+        let n = stmt.execute(rusqlite::params_from_iter(params_vec.iter()))?;
+        Ok(n)
+    }
+
     pub fn drain_inbox(&self, sid: &str, now: i64) -> rusqlite::Result<Vec<InboxRow>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;

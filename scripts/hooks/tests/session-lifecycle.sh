@@ -45,4 +45,15 @@ printf '%s' '{"hook_event_name":"SessionStart","session_id":"s-test-2","cwd":"/t
 sleep 0.2
 grep -q '"transcript_path":"/tmp/captured.jsonl"' "$REC" || { echo "FAIL: transcript_path not posted"; cat "$REC"; exit 1; }
 
+echo "(push-deliver smoke covered by orchestrator handler tests + Task 8 e2e)"
+
+# Unreachable orchestrator: ORCHESTRATOR_URL set to a port nothing listens on.
+set +e
+printf '%s' '{"hook_event_name":"UserPromptSubmit","session_id":"s-test","cwd":"/tmp","prompt":"hi"}' \
+  | ORCHESTRATOR_URL=http://127.0.0.1:1 "$HOOKS/user-prompt-submit.sh" >/tmp/ups-stdout 2>/tmp/ups-stderr
+rc=$?
+set -e
+[ "$rc" = "0" ] || { echo "FAIL: hook exited $rc on unreachable orchestrator"; exit 1; }
+grep -q "orchestrator inbox unreachable" /tmp/ups-stderr || { echo "FAIL: stderr warning missing"; cat /tmp/ups-stderr; exit 1; }
+
 echo "OK"

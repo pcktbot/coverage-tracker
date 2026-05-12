@@ -242,12 +242,37 @@ pub async fn get_transcript_tail(
     Ok(Json(serde_json::json!({"turns": turns})))
 }
 
-pub async fn get_inbox(State(state): State<Arc<AppState>>, Path(sid): Path<String>)
-    -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+#[derive(Deserialize, Default)]
+pub struct PeekQuery { pub peek: Option<u8> }
+
+pub async fn get_inbox(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+    Query(q): Query<PeekQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.store.clone();
-    let msgs = Store::run(store, move |s| s.drain_inbox(&sid, now()))
-        .await.map_err(internal)?;
+    let msgs = if q.peek.unwrap_or(0) == 1 {
+        Store::run(store, move |s| s.peek_inbox(&sid)).await.map_err(internal)?
+    } else {
+        // Default: drain (preserves MCP check_inbox tool contract).
+        Store::run(store, move |s| s.drain_inbox(&sid, now())).await.map_err(internal)?
+    };
     Ok(Json(serde_json::json!({"messages": msgs})))
+}
+
+#[derive(Deserialize)]
+pub struct AckBody { pub ids: Vec<i64> }
+
+pub async fn ack_inbox(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+    Json(b): Json<AckBody>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    Store::run(store, move |s| s.ack_inbox(&sid, &b.ids, ts))
+        .await.map_err(internal)?;
+    Ok("ok")
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -591,6 +616,76 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(v["turns"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn peek_does_not_drain() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        state.store.enqueue_inbox("s1","human",None,1,"first").unwrap();
+        state.store.enqueue_inbox("s1","human",None,2,"second").unwrap();
+
+        let resp = app.clone().oneshot(
+            Request::builder().method("GET").uri("/inbox/s1?peek=1")
+                .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 2);
+
+        let resp = app.clone().oneshot(
+            Request::builder().method("GET").uri("/inbox/s1?peek=1")
+                .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 2);
+
+        let first_id = v["messages"][0]["id"].as_i64().unwrap();
+        let ack_body = format!(r#"{{"ids":[{}]}}"#, first_id);
+        let resp = app.clone().oneshot(
+            Request::builder().method("POST").uri("/inbox/s1/ack")
+                .header("content-type","application/json")
+                .body(Body::from(ack_body)).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app.oneshot(
+            Request::builder().method("GET").uri("/inbox/s1?peek=1")
+                .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(v["messages"][0]["message"], "second");
+    }
+
+    #[tokio::test]
+    async fn ack_idempotent_for_unknown_ids() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/inbox/s1/ack")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"ids":[999,1000]}"#)).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bare_get_still_drains() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        state.store.enqueue_inbox("s1","human",None,1,"hi").unwrap();
+
+        let resp = app.clone().oneshot(
+            Request::builder().method("GET").uri("/inbox/s1")
+                .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+
+        let resp = app.oneshot(
+            Request::builder().method("GET").uri("/inbox/s1")
+                .body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["messages"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
