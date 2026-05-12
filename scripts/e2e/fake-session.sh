@@ -31,3 +31,37 @@ STATUS="$(status_for "$SID")"
 [ "$STATUS" = "done" ] || { echo "FAIL: expected done, got $STATUS"; exit 1; }
 
 echo "OK ($SID)"
+
+# --- Inbox push-deliver round-trip ---
+# Queue a message for the (now-stopped) session — we can still post to its inbox.
+curl -s -X POST "http://127.0.0.1:9876/inbox/$SID" \
+  -H 'content-type: application/json' \
+  -d '{"from_kind":"human","message":"e2e queued reply"}' > /dev/null
+
+# Fire user-prompt-submit.sh and confirm stdout contains the queued message.
+HOOK_OUT="$(printf '%s' "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$SID\",\"cwd\":\"/tmp/e2e\",\"prompt\":\"continue\"}" \
+  | bash "$HOOKS/user-prompt-submit.sh")"
+echo "$HOOK_OUT" | grep -q "e2e queued reply" \
+  || { echo "FAIL: push-deliver did not inject queued message"; echo "got: $HOOK_OUT"; exit 1; }
+
+# Verify ack happened — peek should now return empty messages array.
+PEEK="$(curl -s "http://127.0.0.1:9876/inbox/$SID?peek=1")"
+COUNT=$(printf '%s' "$PEEK" | python3 -c "import json,sys; print(len(json.loads(sys.stdin.read()).get('messages',[])))")
+[ "$COUNT" = "0" ] || { echo "FAIL: ack did not drain (peek count=$COUNT, expected 0)"; exit 1; }
+
+# --- Artifact link round-trip ---
+curl -s -X POST "http://127.0.0.1:9876/sessions/$SID/link" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"project","id":"42","title":"e2e project","url":"https://example.com/p/42"}' > /dev/null
+
+LINKED_KIND=$(curl -s http://127.0.0.1:9876/sessions \
+  | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(next((s.get('artifact_kind','') for s in d['sessions'] if s['id']=='$SID'),''))")
+[ "$LINKED_KIND" = "project" ] || { echo "FAIL: link did not persist (kind=$LINKED_KIND)"; exit 1; }
+
+curl -s -X DELETE "http://127.0.0.1:9876/sessions/$SID/link" > /dev/null
+
+LINKED_KIND=$(curl -s http://127.0.0.1:9876/sessions \
+  | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(next((s.get('artifact_kind') or '' for s in d['sessions'] if s['id']=='$SID'),''))")
+[ -z "$LINKED_KIND" ] || { echo "FAIL: unlink did not clear (kind=$LINKED_KIND)"; exit 1; }
+
+echo "OK push-deliver + link round-trip"
