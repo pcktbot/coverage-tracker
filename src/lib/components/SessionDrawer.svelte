@@ -3,6 +3,7 @@
   import { openPath } from '@tauri-apps/plugin-opener';
   import { listEvents, listArtifacts, type Session, type OrchestratorEvent, type Artifact } from '$lib/orchestrator';
   import InboxComposer from './InboxComposer.svelte';
+  import ArtifactLinker from './ArtifactLinker.svelte';
 
   let { session, onclose }: { session: Session; onclose: () => void } = $props();
   let events = $state<OrchestratorEvent[]>([]);
@@ -19,6 +20,8 @@
     <h2>{session.label ?? session.id}</h2>
     <button class="close" onclick={onclose} aria-label="Close">×</button>
   </header>
+
+  <ArtifactLinker {session} />
 
   <section>
     <h3>Timeline</h3>
