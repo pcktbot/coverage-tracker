@@ -276,6 +276,7 @@
     if (pathname.startsWith('/projects/')) return 'Project Detail';
     if (pathname.startsWith('/repo/')) return 'Repo Detail';
     if (pathname.startsWith('/sessions')) return 'Sessions';
+    if (pathname.startsWith('/inbox')) return 'Inbox';
     return pathname;
   }
 </script>
@@ -338,6 +339,16 @@
             class:active={$page.url.pathname.startsWith('/sessions')}
           >
             Sessions
+          </a>
+        </li>
+        <li>
+          <!-- TODO: when /inbox count > 0 and user is on /sessions or /, push a one-time toast -->
+          <a
+            href="/inbox"
+            class="nav-link"
+            class:active={$page.url.pathname.startsWith('/inbox')}
+          >
+            Inbox
           </a>
         </li>
       </ul>
