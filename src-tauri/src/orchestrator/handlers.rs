@@ -209,6 +209,39 @@ pub async fn lookup_by_pid(State(state): State<Arc<AppState>>, Path(pid): Path<i
     }
 }
 
+pub async fn get_transcript_tail(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.store.clone();
+    let sid_for_lookup = sid.clone();
+    let path: Option<String> = Store::run(store, move |s| -> rusqlite::Result<Option<String>> {
+        Ok(s.get_session(&sid_for_lookup)?.and_then(|r| r.transcript_path))
+    }).await.map_err(internal)?;
+
+    let Some(path) = path else {
+        return Ok(Json(serde_json::json!({"turns": []})));
+    };
+
+    // File read DIRECT — not through Store::run (this is not a DB op).
+    let body = match tokio::fs::read_to_string(&path).await {
+        Ok(b) => b,
+        Err(_) => return Ok(Json(serde_json::json!({"turns": []}))),
+    };
+
+    // Cap at last 5 MB to bound work.
+    let body = if body.len() > 5 * 1024 * 1024 {
+        let tail = &body[body.len() - 5 * 1024 * 1024..];
+        // Drop the first (likely partial) line.
+        tail.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or_default()
+    } else {
+        body
+    };
+
+    let turns = crate::orchestrator::transcript::parse_tail(&body, 10);
+    Ok(Json(serde_json::json!({"turns": turns})))
+}
+
 pub async fn get_inbox(State(state): State<Arc<AppState>>, Path(sid): Path<String>)
     -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.store.clone();
@@ -544,6 +577,20 @@ mod tests {
         assert_eq!(s, "\"github_pr\"");
         let back: ArtifactKind = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, ArtifactKind::GithubPr));
+    }
+
+    #[tokio::test]
+    async fn transcript_empty_when_no_path() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("GET").uri("/sessions/s1/transcript-tail")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["turns"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
