@@ -217,6 +217,77 @@ pub async fn get_inbox(State(state): State<Arc<AppState>>, Path(sid): Path<Strin
     Ok(Json(serde_json::json!({"messages": msgs})))
 }
 
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind { Project, Ado, Confluence, GithubPr }
+
+impl ArtifactKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ArtifactKind::Project => "project",
+            ArtifactKind::Ado => "ado",
+            ArtifactKind::Confluence => "confluence",
+            ArtifactKind::GithubPr => "github_pr",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LinkBody {
+    pub kind: ArtifactKind,
+    pub id: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+}
+
+pub async fn link_session(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+    Json(b): Json<LinkBody>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    let kind_str = b.kind.as_str();
+    let payload = serde_json::json!({"kind":kind_str,"id":b.id,"title":b.title,"url":b.url}).to_string();
+    let sid_for_emit = sid.clone();
+    let kind_for_emit = kind_str.to_string();
+    Store::run(store, move |s| -> rusqlite::Result<()> {
+        s.link_artifact(&sid, kind_str, &b.id, b.title.as_deref(), b.url.as_deref(), ts)?;
+        s.record_event(&sid, ts, "link", &payload)?;
+        Ok(())
+    }).await.map_err(internal)?;
+    let label = state.store.get_session(&sid_for_emit).ok().flatten().and_then(|r| r.label);
+    state.bus.emit(crate::orchestrator::bus::StateChange {
+        session_id: sid_for_emit.clone(),
+        status: state.store.get_session(&sid_for_emit).ok().flatten().map(|r| r.status).unwrap_or_default(),
+        label,
+        reason: Some(format!("linked to {}", kind_for_emit)),
+    });
+    Ok("ok")
+}
+
+pub async fn unlink_session(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    let sid_clone = sid.clone();
+    Store::run(store, move |s| -> rusqlite::Result<()> {
+        s.unlink_artifact(&sid, ts)?;
+        s.record_event(&sid, ts, "unlink", "{}")?;
+        Ok(())
+    }).await.map_err(internal)?;
+    let label = state.store.get_session(&sid_clone).ok().flatten().and_then(|r| r.label);
+    state.bus.emit(crate::orchestrator::bus::StateChange {
+        session_id: sid_clone.clone(),
+        status: state.store.get_session(&sid_clone).ok().flatten().map(|r| r.status).unwrap_or_default(),
+        label,
+        reason: Some("unlinked".to_string()),
+    });
+    Ok("ok")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +475,75 @@ mod tests {
         ).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(state.store.get_session("s1").unwrap().unwrap().transcript_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn link_round_trips() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/sessions/s1/link")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"kind":"project","id":"42","title":"My Project","url":"https://x/y"}"#))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = state.store.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.artifact_kind.as_deref(), Some("project"));
+        assert_eq!(row.artifact_id.as_deref(), Some("42"));
+        assert_eq!(row.artifact_title.as_deref(), Some("My Project"));
+        assert_eq!(row.artifact_url.as_deref(), Some("https://x/y"));
+    }
+
+    #[tokio::test]
+    async fn unlink_clears_fields() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        app.clone().oneshot(
+            Request::builder().method("POST").uri("/sessions/s1/link")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"kind":"project","id":"42"}"#))
+                .unwrap()
+        ).await.unwrap();
+        let resp = app.oneshot(
+            Request::builder().method("DELETE").uri("/sessions/s1/link")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = state.store.get_session("s1").unwrap().unwrap();
+        assert!(row.artifact_kind.is_none());
+        assert!(row.artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn link_bogus_kind_rejected() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/sessions/s1/link")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"kind":"bogus","id":"x"}"#)).unwrap()
+        ).await.unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn unlink_idempotent() {
+        let (app, state) = test_app();
+        seed(&state, "s1");
+        let resp = app.oneshot(
+            Request::builder().method("DELETE").uri("/sessions/s1/link")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn serializes_github_pr_as_snake_case() {
+        let s = serde_json::to_string(&ArtifactKind::GithubPr).unwrap();
+        assert_eq!(s, "\"github_pr\"");
+        let back: ArtifactKind = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, ArtifactKind::GithubPr));
     }
 
     #[tokio::test]

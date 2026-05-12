@@ -19,6 +19,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/inbox/{sid}", post(handlers::post_inbox).get(handlers::get_inbox))
         .route("/sessions", get(handlers::list_sessions))
         .route("/sessions/by-pid/{pid}", get(handlers::lookup_by_pid))
+        .route("/sessions/{sid}/link",
+               post(handlers::link_session).delete(handlers::unlink_session))
         .route("/events", get(handlers::list_events))
         .route("/artifacts", get(handlers::list_artifacts_h))
         .with_state(state)

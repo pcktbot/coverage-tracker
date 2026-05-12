@@ -143,6 +143,27 @@ impl Store {
             params![path, now, sid])?;
         Ok(())
     }
+
+    pub fn link_artifact(&self, sid: &str, kind: &str, id: &str,
+                          title: Option<&str>, url: Option<&str>, now: i64)
+        -> rusqlite::Result<()>
+    {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET artifact_kind=?, artifact_id=?, artifact_title=?, artifact_url=?, updated_at=?
+             WHERE id=?",
+            params![kind, id, title, url, now, sid])?;
+        Ok(())
+    }
+
+    pub fn unlink_artifact(&self, sid: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET artifact_kind=NULL, artifact_id=NULL, artifact_title=NULL, artifact_url=NULL, updated_at=?
+             WHERE id=?",
+            params![now, sid])?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
