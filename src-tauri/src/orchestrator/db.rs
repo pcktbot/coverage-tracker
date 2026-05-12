@@ -19,6 +19,12 @@ pub struct SessionRow {
     pub updated_at: i64,
     pub ended_at: Option<i64>,
     pub end_reason: Option<String>,
+    // NEW (Schema v2)
+    pub transcript_path: Option<String>,
+    pub artifact_kind: Option<String>,
+    pub artifact_id: Option<String>,
+    pub artifact_title: Option<String>,
+    pub artifact_url: Option<String>,
 }
 
 impl Store {
@@ -72,13 +78,17 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
-                    started_at,updated_at,ended_at,end_reason FROM sessions WHERE id=?",
+                    started_at,updated_at,ended_at,end_reason,
+                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url
+             FROM sessions WHERE id=?",
             params![id],
             |r| Ok(SessionRow {
                 id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
                 status: r.get(4)?, current_tool: r.get(5)?, last_progress: r.get(6)?,
                 last_user_prompt: r.get(7)?, started_at: r.get(8)?, updated_at: r.get(9)?,
                 ended_at: r.get(10)?, end_reason: r.get(11)?,
+                transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
+                artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
             }),
         ).optional()
     }
@@ -171,13 +181,16 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
-                    started_at,updated_at,ended_at,end_reason
+                    started_at,updated_at,ended_at,end_reason,
+                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url
              FROM sessions ORDER BY updated_at DESC")?;
         let rows: Vec<SessionRow> = stmt.query_map([], |r| Ok(SessionRow {
             id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
             status: r.get(4)?, current_tool: r.get(5)?, last_progress: r.get(6)?,
             last_user_prompt: r.get(7)?, started_at: r.get(8)?, updated_at: r.get(9)?,
             ended_at: r.get(10)?, end_reason: r.get(11)?,
+            transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
+            artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
         }))?.collect::<Result<Vec<_>,_>>()?;
         Ok(rows)
     }
@@ -237,9 +250,58 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_one() {
-        let store = mem_store();
-        assert_eq!(store.schema_version().unwrap(), 1);
+    fn schema_version_is_two() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_preserves_existing_rows() {
+        use rusqlite::Connection;
+        use crate::db::orchestrator_migrations;
+
+        // Build a v1 DB by hand (mimic the state before this migration ran).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                label TEXT, cwd TEXT NOT NULL, pid INTEGER NOT NULL,
+                status TEXT NOT NULL, current_tool TEXT, last_progress TEXT,
+                last_user_prompt TEXT, started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT
+             );
+             INSERT INTO schema_version(version) VALUES (1);
+             INSERT INTO sessions(id,label,cwd,pid,status,started_at,updated_at)
+                  VALUES ('existing', 'before-migration', '/tmp/old', 999, 'working', 100, 100);"
+        ).unwrap();
+
+        // Run the migration — should bring v1 → v2 without losing the row.
+        orchestrator_migrations::migrate(&conn).unwrap();
+
+        let row: (String, Option<String>, Option<String>, Option<String>) = conn.query_row(
+            "SELECT id, transcript_path, artifact_kind, artifact_title FROM sessions WHERE id='existing'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!(row.0, "existing");
+        assert!(row.1.is_none());
+        assert!(row.2.is_none());
+        assert!(row.3.is_none());
+
+        // schema_version row should reflect v2.
+        let v: i64 = conn.query_row(
+            "SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_is_idempotent() {
+        use crate::db::orchestrator_migrations;
+        let store = Store::open_in_memory().unwrap();
+        // Re-running migrate on an already-migrated v2 connection must not error.
+        let conn = store.lock_conn();
+        orchestrator_migrations::migrate(&conn).unwrap();
+        orchestrator_migrations::migrate(&conn).unwrap();
     }
 
     #[test]

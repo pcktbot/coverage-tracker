@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -14,7 +14,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     loop {
         match version {
             0 => { create_v1(conn)?; version = 1; }
-            1 => break,
+            1 => { upgrade_v1_to_v2(conn)?; version = 2; }
+            2 => break,
             other => panic!("unknown schema version: {other} — upgrade orchestrator binary"),
         }
     }
@@ -24,6 +25,23 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("UPDATE schema_version SET version=?", [SCHEMA_VERSION])?;
     }
     Ok(())
+}
+
+fn upgrade_v1_to_v2(conn: &Connection) -> rusqlite::Result<()> {
+    for col in &["transcript_path", "artifact_kind", "artifact_id", "artifact_title", "artifact_url"] {
+        if !column_exists(conn, "sessions", col)? {
+            conn.execute(&format!("ALTER TABLE sessions ADD COLUMN {} TEXT", col), [])?;
+        }
+    }
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let exists = stmt.query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == col);
+    Ok(exists)
 }
 
 fn create_v1(conn: &Connection) -> rusqlite::Result<()> {
