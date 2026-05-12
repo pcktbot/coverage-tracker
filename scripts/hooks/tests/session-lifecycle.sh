@@ -40,4 +40,9 @@ sleep 0.2
 grep -q '"kind":"notification"' "$REC" || { echo "FAIL: notification kind"; exit 1; }
 grep -q '"message":"awaiting input"' "$REC" || { echo "FAIL: message"; exit 1; }
 
+printf '%s' '{"hook_event_name":"SessionStart","session_id":"s-test-2","cwd":"/tmp/work","transcript_path":"/tmp/captured.jsonl"}' \
+  | "$HOOKS/session-start.sh"
+sleep 0.2
+grep -q '"transcript_path":"/tmp/captured.jsonl"' "$REC" || { echo "FAIL: transcript_path not posted"; cat "$REC"; exit 1; }
+
 echo "OK"

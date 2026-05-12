@@ -136,6 +136,13 @@ impl Store {
             params![prompt, now, sid])?;
         Ok(())
     }
+    pub fn set_transcript_path(&self, sid: &str, path: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET transcript_path=?, updated_at=? WHERE id=?",
+            params![path, now, sid])?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

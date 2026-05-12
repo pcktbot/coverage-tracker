@@ -10,11 +10,11 @@ use crate::orchestrator::{
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventBody {
-    SessionStart { session_id: String, cwd: String, pid: i64, label: Option<String> },
-    UserPromptSubmit { session_id: String, prompt: String },
-    PreToolUse { session_id: String, tool: String },
-    Notification { session_id: String, message: String },
-    Stop { session_id: String, error: Option<bool>, reason: Option<String> },
+    SessionStart { session_id: String, cwd: String, pid: i64, label: Option<String>, transcript_path: Option<String> },
+    UserPromptSubmit { session_id: String, prompt: String, transcript_path: Option<String> },
+    PreToolUse { session_id: String, tool: String, transcript_path: Option<String> },
+    Notification { session_id: String, message: String, transcript_path: Option<String> },
+    Stop { session_id: String, error: Option<bool>, reason: Option<String>, transcript_path: Option<String> },
 }
 
 pub(crate) fn now() -> i64 {
@@ -47,41 +47,56 @@ pub async fn post_event(
     let store = state.store.clone();
     let (sid, new_status, reason) = Store::run(store, move |store| -> Result<(String, &'static str, Option<String>), rusqlite::Error> {
         match body {
-            EventBody::SessionStart { session_id, cwd, pid, label } => {
+            EventBody::SessionStart { session_id, cwd, pid, label, transcript_path } => {
                 store.upsert_session_start(&session_id, label.as_deref(), &cwd, pid, ts)?;
                 let p = serde_json::json!({"cwd":cwd,"pid":pid,"label":label}).to_string();
                 store.record_event(&session_id, ts, "session_start", &p)?;
+                if let Some(tp) = transcript_path.as_ref() {
+                    store.set_transcript_path(&session_id, tp, ts)?;
+                }
                 Ok((session_id, "working", None))
             }
-            EventBody::UserPromptSubmit { session_id, prompt } => {
+            EventBody::UserPromptSubmit { session_id, prompt, transcript_path } => {
                 store.set_last_user_prompt(&session_id, &prompt, ts)?;
                 let ns = transition(&current_status(store, &session_id), &EventKind::UserPromptSubmit);
                 store.apply_status(&session_id, ns, ts, None)?;
                 store.record_event(&session_id, ts, "user_prompt",
                     &serde_json::to_string(&prompt).unwrap_or_default())?;
+                if let Some(tp) = transcript_path.as_ref() {
+                    store.set_transcript_path(&session_id, tp, ts)?;
+                }
                 Ok((session_id, ns, None))
             }
-            EventBody::PreToolUse { session_id, tool } => {
+            EventBody::PreToolUse { session_id, tool, transcript_path } => {
                 store.set_current_tool(&session_id, &tool, ts)?;
                 let ns = transition(&current_status(store, &session_id), &EventKind::PreToolUse);
                 store.apply_status(&session_id, ns, ts, None)?;
                 store.record_event(&session_id, ts, "pre_tool",
                     &serde_json::to_string(&tool).unwrap_or_default())?;
+                if let Some(tp) = transcript_path.as_ref() {
+                    store.set_transcript_path(&session_id, tp, ts)?;
+                }
                 Ok((session_id, ns, None))
             }
-            EventBody::Notification { session_id, message } => {
+            EventBody::Notification { session_id, message, transcript_path } => {
                 let ns = transition(&current_status(store, &session_id), &EventKind::Notification);
                 store.apply_status(&session_id, ns, ts, None)?;
                 store.record_event(&session_id, ts, "notification",
                     &serde_json::to_string(&message).unwrap_or_default())?;
+                if let Some(tp) = transcript_path.as_ref() {
+                    store.set_transcript_path(&session_id, tp, ts)?;
+                }
                 Ok((session_id, ns, Some(message)))
             }
-            EventBody::Stop { session_id, error, reason } => {
+            EventBody::Stop { session_id, error, reason, transcript_path } => {
                 let is_err = error.unwrap_or(false);
                 let ns = transition(&current_status(store, &session_id), &EventKind::Stop { error: is_err });
                 store.apply_status(&session_id, ns, ts, Some((ts, reason.as_deref().unwrap_or(""))))?;
                 store.record_event(&session_id, ts, "stop",
                     &serde_json::json!({"error":is_err,"reason":reason}).to_string())?;
+                if let Some(tp) = transcript_path.as_ref() {
+                    store.set_transcript_path(&session_id, tp, ts)?;
+                }
                 Ok((session_id, ns, reason))
             }
         }
@@ -361,6 +376,34 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(v["artifacts"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_start_with_transcript_path_round_trips() {
+        let (app, state) = test_app();
+        let body = r#"{"kind":"session_start","session_id":"s1","cwd":"/tmp","pid":1,"label":"x","transcript_path":"/tmp/t.jsonl"}"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/event")
+                .header("content-type","application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = state.store.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+    }
+
+    #[tokio::test]
+    async fn session_start_without_transcript_path_still_succeeds() {
+        // Backward-compat regression: payloads from older hooks omit transcript_path.
+        let (app, state) = test_app();
+        let body = r#"{"kind":"session_start","session_id":"s1","cwd":"/tmp","pid":1,"label":"x"}"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/event")
+                .header("content-type","application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.store.get_session("s1").unwrap().unwrap().transcript_path.is_none());
     }
 
     #[tokio::test]
