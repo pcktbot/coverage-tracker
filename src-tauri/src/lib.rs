@@ -53,8 +53,14 @@ pub fn run() {
             use tauri_plugin_notification::NotificationExt;
             use crate::orchestrator::{self, state::AppState, db::Store};
 
-            let app_data_dir = app.path().app_data_dir().expect("app data dir");
-            let db_path = app_data_dir.join("orchestrator.db");
+            // Co-locate with the existing coverage.db under
+            // ~/Library/Application Support/coverage-manager/ instead of
+            // Tauri's bundle-id-based dir, so all of the app's persistent
+            // state lives under one directory. Matches db::db_path().
+            let db_path = dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("coverage-manager")
+                .join("orchestrator.db");
             let store = Arc::new(Store::open_at(&db_path).expect("open orchestrator db"));
             let state = AppState::new(store.clone());
 
