@@ -6,7 +6,7 @@ read_stdin() { HOOK_INPUT="$(cat)"; }
 
 hook_field() {
   printf '%s' "$HOOK_INPUT" \
-    | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('$1',''))" 2>/dev/null
+    | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d.get(sys.argv[1],""))' "$1" 2>/dev/null
 }
 
 post_event() {
