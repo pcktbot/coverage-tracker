@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { openPath } from '@tauri-apps/plugin-opener';
   import {
     getTranscriptTail, listEvents, listArtifacts,
@@ -17,18 +16,25 @@
   let artifacts = $state<Artifact[]>([]);
   let expanded = $state(false);
 
-  onMount(async () => {
-    const turns = await getTranscriptTail(session.id, 4);
-    for (let i = turns.length - 1; i >= 0; i--) {
-      if (turns[i].role === 'assistant') { lastAssistantTurn = turns[i]; break; }
-    }
-  });
-
+  let loading = $state(false);
   async function toggle() {
     expanded = !expanded;
-    if (expanded && events.length === 0) {
-      events = await listEvents(session.id);
-      artifacts = await listArtifacts(session.id);
+    if (expanded && !loading && events.length === 0) {
+      loading = true;
+      try {
+        const [evs, arts, turns] = await Promise.all([
+          listEvents(session.id),
+          listArtifacts(session.id),
+          getTranscriptTail(session.id, 4),
+        ]);
+        events = evs;
+        artifacts = arts;
+        for (let i = turns.length - 1; i >= 0; i--) {
+          if (turns[i].role === 'assistant') { lastAssistantTurn = turns[i]; break; }
+        }
+      } finally {
+        loading = false;
+      }
     }
   }
 
@@ -72,13 +78,6 @@
     </section>
   {/if}
 
-  {#if lastAssistantTurn}
-    <section>
-      <h4>Last assistant turn</h4>
-      <pre class="turn">{lastAssistantTurn.text}</pre>
-    </section>
-  {/if}
-
   <section>
     <button class="expand" onclick={toggle} type="button">
       <span class="chev">{expanded ? '▼' : '▶'}</span>
@@ -87,6 +86,13 @@
 
     {#if expanded}
       <div class="details">
+        {#if lastAssistantTurn}
+          <section>
+            <h4>Last assistant turn</h4>
+            <pre class="turn">{lastAssistantTurn.text}</pre>
+          </section>
+        {/if}
+
         <ArtifactLinker {session} />
 
         <ToolTimeline sessionId={session.id} />
