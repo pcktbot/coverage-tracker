@@ -10,7 +10,7 @@ use crate::orchestrator::{
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventBody {
-    SessionStart { session_id: String, cwd: String, pid: i64, label: Option<String>, transcript_path: Option<String> },
+    SessionStart { session_id: String, cwd: String, pid: i64, label: Option<String>, transcript_path: Option<String>, loaded_snapshot: Option<String> },
     UserPromptSubmit { session_id: String, prompt: String, transcript_path: Option<String> },
     PreToolUse { session_id: String, tool: String, transcript_path: Option<String> },
     Notification { session_id: String, message: String, transcript_path: Option<String> },
@@ -47,12 +47,15 @@ pub async fn post_event(
     let store = state.store.clone();
     let (sid, new_status, reason) = Store::run(store, move |store| -> Result<(String, &'static str, Option<String>), rusqlite::Error> {
         match body {
-            EventBody::SessionStart { session_id, cwd, pid, label, transcript_path } => {
+            EventBody::SessionStart { session_id, cwd, pid, label, transcript_path, loaded_snapshot } => {
                 store.upsert_session_start(&session_id, label.as_deref(), &cwd, pid, ts)?;
                 let p = serde_json::json!({"cwd":cwd,"pid":pid,"label":label}).to_string();
                 store.record_event(&session_id, ts, "session_start", &p)?;
                 if let Some(tp) = transcript_path.as_ref() {
                     store.set_transcript_path(&session_id, tp, ts)?;
+                }
+                if let Some(snap) = loaded_snapshot.as_ref() {
+                    store.set_loaded_snapshot(&session_id, snap, ts)?;
                 }
                 Ok((session_id, "working", None))
             }
@@ -533,6 +536,33 @@ mod tests {
         ).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(state.store.get_session("s1").unwrap().unwrap().transcript_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_start_with_loaded_snapshot_round_trips() {
+        let (app, state) = test_app();
+        let body = r#"{"kind":"session_start","session_id":"s1","cwd":"/tmp","pid":1,"label":"x","loaded_snapshot":"{\"plugins\":[\"superpowers\"]}"}"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/event")
+                .header("content-type","application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = state.store.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.loaded_snapshot.as_deref(), Some(r#"{"plugins":["superpowers"]}"#));
+    }
+
+    #[tokio::test]
+    async fn session_start_without_loaded_snapshot_still_succeeds() {
+        let (app, state) = test_app();
+        let body = r#"{"kind":"session_start","session_id":"s1","cwd":"/tmp","pid":1,"label":"x"}"#;
+        let resp = app.oneshot(
+            Request::builder().method("POST").uri("/event")
+                .header("content-type","application/json")
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.store.get_session("s1").unwrap().unwrap().loaded_snapshot.is_none());
     }
 
     #[tokio::test]
