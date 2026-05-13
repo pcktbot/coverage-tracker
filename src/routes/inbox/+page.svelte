@@ -2,18 +2,17 @@
   import { onMount, onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import InboxRow from '$lib/components/InboxRow.svelte';
-  import { listSessions, type Session } from '$lib/orchestrator';
+  import { listSessions, type Session, type SessionStatus } from '$lib/orchestrator';
+
+  type Filter = 'all' | 'needs_input' | SessionStatus;
+  const FILTERS: Filter[] = ['needs_input', 'all', 'working', 'idle', 'done', 'error'];
 
   let sessions = $state<Session[]>([]);
+  let filter = $state<Filter>('needs_input');
   let unlisten: UnlistenFn | undefined;
 
   async function refresh() {
-    try {
-      const all = await listSessions();
-      sessions = all.filter((s) => s.status === 'needs_input');
-    } catch {
-      sessions = [];
-    }
+    try { sessions = await listSessions(); } catch { sessions = []; }
   }
 
   onMount(async () => {
@@ -21,26 +20,45 @@
     unlisten = await listen('orchestrator://state', () => { void refresh(); });
   });
   onDestroy(() => { unlisten?.(); });
+
+  const visible = $derived.by(() => {
+    const filtered = filter === 'all' ? sessions : sessions.filter((s) => s.status === filter);
+    return [...filtered].sort((a, b) => {
+      if (a.status === 'needs_input' && b.status !== 'needs_input') return -1;
+      if (b.status === 'needs_input' && a.status !== 'needs_input') return 1;
+      return b.updated_at - a.updated_at;
+    });
+  });
+
+  const needsInputCount = $derived(sessions.filter((s) => s.status === 'needs_input').length);
 </script>
 
 <header class="bar">
-  <h1>Inbox</h1>
-  <span class="count">{sessions.length} session{sessions.length === 1 ? '' : 's'} waiting</span>
-  <button onclick={() => void refresh()} type="button" class="refresh">Refresh</button>
+  <h1>Sessions {#if needsInputCount > 0}<span class="badge">{needsInputCount}</span>{/if}</h1>
+  <div class="filters">
+    {#each FILTERS as f}
+      <button class:active={filter === f} onclick={() => (filter = f)} type="button">{f}</button>
+    {/each}
+  </div>
 </header>
 
-{#if sessions.length === 0}
-  <p class="empty">No sessions need input — nice. Reply text you compose here is queued and prepended to a session's next user prompt; it isn't pushed live. Type something in the terminal to deliver.</p>
-{:else}
-  {#each sessions as session (session.id)}
-    <InboxRow {session} />
+<ul class="rows">
+  {#each visible as s (s.id)}
+    <li><InboxRow session={s} /></li>
   {/each}
-{/if}
+  {#if visible.length === 0}
+    <li class="empty">No sessions match.</li>
+  {/if}
+</ul>
 
 <style>
-  .bar { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 1rem; }
+  .bar { display: flex; align-items: baseline; gap: 1rem; }
   h1 { margin: 0; }
-  .count { color: var(--text-muted); }
-  .refresh { margin-left: auto; padding: 0.25rem 0.75rem; border: 1px solid var(--border); background: var(--bg); border-radius: var(--radius-sm); cursor: pointer; font: inherit; color: inherit; }
-  .empty { padding: 2rem; color: var(--text-muted); font-style: italic; text-align: center; max-width: 600px; margin: 2rem auto; line-height: 1.5; }
+  .badge { background: #f39c12; color: white; border-radius: 999px; font-size: 0.75rem; padding: 0.125rem 0.5rem; margin-left: 0.25rem; vertical-align: middle; }
+  .filters { display: flex; gap: 0.25rem; }
+  .filters button { padding: 0.25rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); cursor: pointer; font: inherit; color: inherit; }
+  .filters button.active { background: var(--accent-subtle); color: var(--accent); }
+  .rows { list-style: none; padding: 0; margin: 1rem 0; }
+  .rows li { list-style: none; }
+  .empty { padding: 1rem; color: var(--text-muted); font-style: italic; }
 </style>
