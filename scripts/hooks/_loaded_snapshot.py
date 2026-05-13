@@ -10,7 +10,7 @@ Inputs (best-effort, missing files silently skipped):
   - $CWD/.claude/settings.local.json                          merged
   - $CWD/.mcp.json                                            mcpServers
   - $CWD/.claude/skills/*/SKILL.md                            project skills
-  - ~/.claude/plugins/cache/*/*/skills/*/SKILL.md             plugin-provided skills
+  - ~/.claude/plugins/cache/**/skills/*/SKILL.md              plugin-provided skills
 """
 import json, os, sys, glob
 
@@ -40,7 +40,7 @@ def main():
     for skill_md in glob.glob(os.path.join(cwd, ".claude/skills/*/SKILL.md")):
         skills.add(os.path.basename(os.path.dirname(skill_md)))
     for skill_md in glob.glob(os.path.expanduser(
-        "~/.claude/plugins/cache/*/*/skills/*/SKILL.md")):
+        "~/.claude/plugins/cache/**/skills/*/SKILL.md"), recursive=True):
         skills.add(os.path.basename(os.path.dirname(skill_md)))
 
     print(json.dumps({
