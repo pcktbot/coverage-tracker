@@ -25,6 +25,8 @@ pub struct SessionRow {
     pub artifact_id: Option<String>,
     pub artifact_title: Option<String>,
     pub artifact_url: Option<String>,
+    // NEW (Schema v3)
+    pub loaded_snapshot: Option<String>,
 }
 
 impl Store {
@@ -79,7 +81,8 @@ impl Store {
         conn.query_row(
             "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
                     started_at,updated_at,ended_at,end_reason,
-                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url
+                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url,
+                    loaded_snapshot
              FROM sessions WHERE id=?",
             params![id],
             |r| Ok(SessionRow {
@@ -89,6 +92,7 @@ impl Store {
                 ended_at: r.get(10)?, end_reason: r.get(11)?,
                 transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
                 artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
+                loaded_snapshot: r.get(17)?,
             }),
         ).optional()
     }
@@ -141,6 +145,13 @@ impl Store {
         conn.execute(
             "UPDATE sessions SET transcript_path=?, updated_at=? WHERE id=?",
             params![path, now, sid])?;
+        Ok(())
+    }
+    pub fn set_loaded_snapshot(&self, sid: &str, snapshot: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET loaded_snapshot=?, updated_at=? WHERE id=?",
+            params![snapshot, now, sid])?;
         Ok(())
     }
 
@@ -210,7 +221,8 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
                     started_at,updated_at,ended_at,end_reason,
-                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url
+                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url,
+                    loaded_snapshot
              FROM sessions ORDER BY updated_at DESC")?;
         let rows: Vec<SessionRow> = stmt.query_map([], |r| Ok(SessionRow {
             id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
@@ -219,6 +231,7 @@ impl Store {
             ended_at: r.get(10)?, end_reason: r.get(11)?,
             transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
             artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
+            loaded_snapshot: r.get(17)?,
         }))?.collect::<Result<Vec<_>,_>>()?;
         Ok(rows)
     }
@@ -380,5 +393,14 @@ mod tests {
         let s = store.clone();
         let row = Store::run(s, |st| st.get_session("s1")).await.unwrap().unwrap();
         assert_eq!(row.id, "s1");
+    }
+
+    #[test]
+    fn loaded_snapshot_persists_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_loaded_snapshot("s1", r#"{"plugins":["a"]}"#, 2).unwrap();
+        let row = s.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.loaded_snapshot.as_deref(), Some(r#"{"plugins":["a"]}"#));
     }
 }
