@@ -311,9 +311,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_two() {
+    fn schema_version_is_three() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), 3);
     }
 
     #[test]
@@ -338,7 +338,7 @@ mod tests {
                   VALUES ('existing', 'before-migration', '/tmp/old', 999, 'working', 100, 100);"
         ).unwrap();
 
-        // Run the migration — should bring v1 → v2 without losing the row.
+        // Run the migration — should bring v1 → v3 without losing the row.
         orchestrator_migrations::migrate(&conn).unwrap();
 
         let row: (String, Option<String>, Option<String>, Option<String>) = conn.query_row(
@@ -349,10 +349,10 @@ mod tests {
         assert!(row.2.is_none());
         assert!(row.3.is_none());
 
-        // schema_version row should reflect v2.
+        // schema_version row should reflect v3 (the current schema version).
         let v: i64 = conn.query_row(
             "SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
     }
 
     #[test]

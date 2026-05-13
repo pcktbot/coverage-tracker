@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -15,7 +15,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         match version {
             0 => { create_v1(conn)?; version = 1; }
             1 => { upgrade_v1_to_v2(conn)?; version = 2; }
-            2 => break,
+            2 => { upgrade_v2_to_v3(conn)?; version = 3; }
+            3 => break,
             other => panic!("unknown schema version: {other} — upgrade orchestrator binary"),
         }
     }
@@ -23,6 +24,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("INSERT INTO schema_version(version) VALUES (?)", [SCHEMA_VERSION])?;
     } else if current != SCHEMA_VERSION {
         conn.execute("UPDATE schema_version SET version=?", [SCHEMA_VERSION])?;
+    }
+    Ok(())
+}
+
+fn upgrade_v2_to_v3(conn: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(conn, "sessions", "loaded_snapshot")? {
+        conn.execute("ALTER TABLE sessions ADD COLUMN loaded_snapshot TEXT", [])?;
     }
     Ok(())
 }
@@ -42,6 +50,39 @@ fn column_exists(conn: &Connection, table: &str, col: &str) -> rusqlite::Result<
         .filter_map(|r| r.ok())
         .any(|name| name == col);
     Ok(exists)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn fresh_db_has_loaded_snapshot_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        assert!(column_exists(&conn, "sessions", "loaded_snapshot").unwrap());
+    }
+
+    #[test]
+    fn v2_db_upgrades_to_v3_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v1(&conn).unwrap();
+        upgrade_v1_to_v2(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);"
+        ).unwrap();
+        conn.execute("INSERT INTO schema_version(version) VALUES (2)", []).unwrap();
+
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap(); // idempotent
+
+        assert!(column_exists(&conn, "sessions", "loaded_snapshot").unwrap());
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+    }
 }
 
 fn create_v1(conn: &Connection) -> rusqlite::Result<()> {
