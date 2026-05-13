@@ -6,12 +6,21 @@
   let toolEvents = $state<OrchestratorEvent[]>([]);
 
   onMount(async () => {
-    const all = await listEvents(sessionId, 400);
-    toolEvents = all.filter((e) => e.kind === 'pre_tool').slice(0, limit).reverse();
+    try {
+      const all = await listEvents(sessionId, 400);
+      toolEvents = all.filter((e) => e.kind === 'pre_tool').slice(0, limit).reverse();
+    } catch {
+      toolEvents = [];
+    }
   });
 
   function toolName(payload: string): string {
-    try { return JSON.parse(payload); } catch { return payload; }
+    try {
+      const v = JSON.parse(payload);
+      return typeof v === 'string' ? v : payload;
+    } catch {
+      return payload;
+    }
   }
 </script>
 
