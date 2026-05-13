@@ -87,7 +87,7 @@ mod migration_tests {
 
 fn create_v1(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "CREATE TABLE sessions (
+        "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             label TEXT,
             cwd TEXT NOT NULL,
@@ -101,16 +101,16 @@ fn create_v1(conn: &Connection) -> rusqlite::Result<()> {
             ended_at INTEGER,
             end_reason TEXT
          );
-         CREATE INDEX idx_sessions_pid ON sessions(pid);
-         CREATE TABLE events (
+         CREATE INDEX IF NOT EXISTS idx_sessions_pid ON sessions(pid);
+         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             ts INTEGER NOT NULL,
             kind TEXT NOT NULL,
             payload TEXT NOT NULL
          );
-         CREATE INDEX idx_events_session_ts ON events(session_id, ts);
-         CREATE TABLE artifacts (
+         CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(session_id, ts);
+         CREATE TABLE IF NOT EXISTS artifacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             ts INTEGER NOT NULL,
@@ -118,7 +118,7 @@ fn create_v1(conn: &Connection) -> rusqlite::Result<()> {
             label TEXT,
             kind TEXT NOT NULL
          );
-         CREATE TABLE inbox (
+         CREATE TABLE IF NOT EXISTS inbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             from_kind TEXT NOT NULL CHECK (from_kind IN ('human','session')),
@@ -127,7 +127,7 @@ fn create_v1(conn: &Connection) -> rusqlite::Result<()> {
             message TEXT NOT NULL,
             delivered_at INTEGER
          );
-         CREATE INDEX idx_inbox_session_undelivered
+         CREATE INDEX IF NOT EXISTS idx_inbox_session_undelivered
             ON inbox(session_id) WHERE delivered_at IS NULL;"
     )
 }
