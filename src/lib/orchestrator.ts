@@ -22,6 +22,7 @@ export interface Session {
   artifact_id: string | null;
   artifact_title: string | null;
   artifact_url: string | null;
+  loaded_snapshot: string | null;
 }
 
 export interface LinkBody {
