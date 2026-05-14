@@ -25,6 +25,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/{sid}/transcript-tail", get(handlers::get_transcript_tail))
         .route("/events", get(handlers::list_events))
         .route("/artifacts", get(handlers::list_artifacts_h))
+        .route("/admin/tables", get(handlers::admin_tables))
+        .route("/admin/rows", get(handlers::admin_rows))
         .with_state(state)
         .layer(cors)
 }

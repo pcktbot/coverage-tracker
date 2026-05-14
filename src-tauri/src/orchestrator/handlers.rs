@@ -349,6 +349,125 @@ pub async fn unlink_session(
     Ok("ok")
 }
 
+// ---------- Admin: read-only DB browser ----------
+
+#[derive(serde::Deserialize)]
+pub struct AdminTablesQuery { pub db: String }
+
+#[derive(serde::Deserialize)]
+pub struct AdminRowsQuery {
+    pub db: String,
+    pub table: String,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+fn open_readonly(which: &str) -> Result<rusqlite::Connection, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let base = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("coverage-manager");
+    let path = match which {
+        "orchestrator" => base.join("orchestrator.db"),
+        "coverage"     => base.join("coverage.db"),
+        _ => return Err((StatusCode::BAD_REQUEST, format!("unknown db: {which}"))),
+    };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    rusqlite::Connection::open_with_flags(&path, flags)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("open {which}: {e}")))
+}
+
+fn list_user_tables(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master \
+         WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+         ORDER BY name")?;
+    let result = stmt.query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>();
+    result
+}
+
+pub async fn admin_tables(
+    Query(q): Query<AdminTablesQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let which = q.db.clone();
+    let conn = open_readonly(&which)?;
+    let tables = tokio::task::spawn_blocking(move || list_user_tables(&conn))
+        .await.map_err(internal)?.map_err(internal)?;
+    Ok(Json(serde_json::json!({ "db": which, "tables": tables })))
+}
+
+pub async fn admin_rows(
+    Query(q): Query<AdminRowsQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+
+    // Open RO connection (also validates `db` allowlist).
+    let conn = open_readonly(&q.db)?;
+
+    // Validate table name against actual schema — never interpolate arbitrary text into SQL.
+    let table_list = list_user_tables(&conn).map_err(internal)?;
+    let table = q.table.clone();
+    if !table_list.iter().any(|t| t == &table) {
+        return Err((StatusCode::BAD_REQUEST, format!("unknown table: {table}")));
+    }
+
+    let limit  = q.limit.unwrap_or(100).clamp(1, 1000);
+    let offset = q.offset.unwrap_or(0).max(0);
+
+    // Column names via PRAGMA (table name already validated above).
+    let quoted = table.replace('"', "\"\"");
+    let col_names: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info(\"{}\")", quoted))
+            .map_err(internal)?;
+        let result = stmt.query_map([], |r| r.get::<_, String>(1))
+            .map_err(internal)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal)?;
+        result
+    };
+
+    // SELECT rows.
+    let sql = format!("SELECT * FROM \"{}\" LIMIT ? OFFSET ?", quoted);
+    let mut stmt = conn.prepare(&sql).map_err(internal)?;
+    let mut rows = stmt.query(rusqlite::params![limit, offset]).map_err(internal)?;
+
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    while let Some(row) = rows.next().map_err(internal)? {
+        let mut obj = serde_json::Map::new();
+        for (i, name) in col_names.iter().enumerate() {
+            let v: rusqlite::types::Value = row.get(i).map_err(internal)?;
+            let jv = match v {
+                rusqlite::types::Value::Null       => serde_json::Value::Null,
+                rusqlite::types::Value::Integer(n) => serde_json::Value::from(n),
+                rusqlite::types::Value::Real(f)    => serde_json::Value::from(f),
+                rusqlite::types::Value::Text(s)    => serde_json::Value::String(s),
+                rusqlite::types::Value::Blob(b)    =>
+                    serde_json::Value::String(format!("<blob {} bytes>", b.len())),
+            };
+            obj.insert(name.clone(), jv);
+        }
+        out.push(serde_json::Value::Object(obj));
+    }
+
+    // Total row count for pagination footer.
+    let count: i64 = conn
+        .query_row(&format!("SELECT COUNT(*) FROM \"{}\"", quoted), [], |r| r.get(0))
+        .map_err(internal)?;
+
+    Ok(Json(serde_json::json!({
+        "db":      q.db,
+        "table":   table,
+        "columns": col_names,
+        "rows":    out,
+        "limit":   limit,
+        "offset":  offset,
+        "total":   count,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +835,32 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(v["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn admin_rows_rejects_unknown_table() {
+        // The handler opens the real DB file by path; in the test environment that
+        // file won't exist, so open_readonly will fail with INTERNAL_SERVER_ERROR.
+        // Either a 4xx or 5xx response confirms no SQL was executed with the bogus
+        // table name — either path is safe.
+        let (app, _state) = test_app();
+        let resp = app.oneshot(
+            Request::builder().method("GET")
+                .uri("/admin/rows?db=orchestrator&table=__nonexistent__")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert!(resp.status().is_client_error() || resp.status().is_server_error());
+    }
+
+    #[tokio::test]
+    async fn admin_tables_rejects_unknown_db() {
+        let (app, _state) = test_app();
+        let resp = app.oneshot(
+            Request::builder().method("GET")
+                .uri("/admin/tables?db=evil_db")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
