@@ -70,7 +70,7 @@
   .rows {
     list-style: none; padding: 0; margin: 1rem 0;
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(420px, 600px));
+    grid-template-columns: repeat(auto-fill, minmax(360px, 480px));
     gap: 1rem;
     align-items: start;
   }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { openPath } from '@tauri-apps/plugin-opener';
   import {
     getTranscriptTail, listEvents, listArtifacts,
@@ -18,6 +19,18 @@
   let expanded = $state(false);
   let promptOpen = $state(false);
   let loading = $state(false);
+
+  // For needs_input sessions, eagerly fetch the latest assistant turn so the
+  // user has the question/blocker visible right above the composer.
+  onMount(async () => {
+    if (session.status !== 'needs_input') return;
+    try {
+      const turns = await getTranscriptTail(session.id, 4);
+      for (let i = turns.length - 1; i >= 0; i--) {
+        if (turns[i].role === 'assistant') { lastAssistantTurn = turns[i]; break; }
+      }
+    } catch { /* best-effort */ }
+  });
 
   async function toggle() {
     expanded = !expanded;
@@ -126,13 +139,6 @@
     </section>
   {/if}
 
-  {#if lastAssistantTurn}
-    <section>
-      <h4>Last assistant turn</h4>
-      <pre class="turn">{lastAssistantTurn.text}</pre>
-    </section>
-  {/if}
-
   <section>
     <button class="expand" onclick={toggle} type="button">
       <span class="chev">{expanded ? '▼' : '▶'}</span>
@@ -177,6 +183,13 @@
     {/if}
   </section>
 
+  {#if lastAssistantTurn}
+    <section>
+      <h4>Latest assistant response</h4>
+      <pre class="turn">{lastAssistantTurn.text}</pre>
+    </section>
+  {/if}
+
   <section class="composer">
     <InboxComposer sessionId={session.id} />
   </section>
@@ -189,7 +202,7 @@
     padding: 1rem;
     background: var(--bg);
   }
-  .row.needs-input { border-left: 3px solid #f39c12; }
+  .row.needs-input { box-shadow: inset 0 -3px 0 #f39c12; padding-bottom: calc(1rem + 3px); }
   .row.dismissed { opacity: 0.55; }
 
   header { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
