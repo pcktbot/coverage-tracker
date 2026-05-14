@@ -9,6 +9,15 @@
     adoPreview,
     type Settings, type GithubAuthDiagnostics, type AgentProfile, type AdoPreview,
   } from '$lib/api';
+  import {
+    THEME_FIELDS,
+    loadThemeSettings,
+    applyThemeSettings,
+    setThemeColor,
+    resetThemeSettings,
+    type ThemeKey,
+    type ThemeSettings,
+  } from '$lib/theme';
 
   let settings = $state<Settings>({
     github_token: '',
@@ -52,6 +61,40 @@
   let adoChecking = $state(false);
   let adoPreviewData = $state<AdoPreview | null>(null);
   let adoError = $state('');
+
+  // Theme panel state
+  let theme = $state<ThemeSettings>(loadThemeSettings());
+  let themeDrafts = $state<Partial<Record<ThemeKey, string>>>({ ...theme });
+
+  function syncThemeDrafts() {
+    themeDrafts = { ...theme };
+  }
+
+  function handleThemeColorChange(key: ThemeKey, value: string) {
+    themeDrafts = { ...themeDrafts, [key]: value };
+    const { theme: next, normalized } = setThemeColor(theme, key, value);
+    theme = next;
+    themeDrafts = { ...themeDrafts, [key]: normalized };
+  }
+
+  function commitThemeDraft(key: ThemeKey) {
+    const draft = themeDrafts[key] ?? theme[key];
+    const { theme: next, normalized } = setThemeColor(theme, key, draft);
+    theme = next;
+    themeDrafts = { ...themeDrafts, [key]: normalized };
+  }
+
+  function handleThemeKeyDown(e: KeyboardEvent, key: ThemeKey) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitThemeDraft(key);
+    }
+  }
+
+  function handleThemeReset() {
+    theme = resetThemeSettings();
+    syncThemeDrafts();
+  }
 
   let filteredRepos = $derived(
     $repos.filter((r) => r.name.toLowerCase().includes(repoFilter.toLowerCase()))
@@ -218,6 +261,40 @@
 {#if error}
   <div class="error-msg" style="margin-bottom:1rem">{error}</div>
 {/if}
+
+<section class="card theme-panel">
+  <div class="theme-panel-header">
+    <div>
+      <h2>Theme</h2>
+      <p class="hint">Hex colors are applied live and saved per browser. Headings and body use IBM Plex Sans; code uses IBM Plex Mono.</p>
+    </div>
+    <button class="btn-secondary" type="button" onclick={handleThemeReset}>Reset theme</button>
+  </div>
+  <div class="theme-grid">
+    {#each THEME_FIELDS as field}
+      <div class="theme-field">
+        <label class="settings-label" for={`theme-${field.key}`}>{field.label}</label>
+        <div class="theme-color-row">
+          <input
+            id={`theme-${field.key}`}
+            type="color"
+            class="theme-color-picker"
+            value={theme[field.key]}
+            oninput={(e) => handleThemeColorChange(field.key, (e.currentTarget as HTMLInputElement).value)}
+          />
+          <input
+            type="text"
+            class="theme-color-value mono"
+            value={themeDrafts[field.key] ?? theme[field.key]}
+            oninput={(e) => { themeDrafts = { ...themeDrafts, [field.key]: (e.currentTarget as HTMLInputElement).value }; }}
+            onblur={() => commitThemeDraft(field.key)}
+            onkeydown={(e) => handleThemeKeyDown(e, field.key)}
+          />
+        </div>
+      </div>
+    {/each}
+  </div>
+</section>
 
 <div class="settings-grid">
   <!-- GitHub token -->
@@ -604,6 +681,45 @@
 </div>
 
 <style>
+  .theme-panel { padding: 1.25rem; margin-bottom: 1rem; }
+  .theme-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  .theme-panel-header h2 { margin-bottom: 0.25rem; }
+  .theme-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem 1rem;
+  }
+  .theme-field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .settings-label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .theme-color-row { display: flex; align-items: center; gap: 0.5rem; }
+  .theme-color-picker {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .theme-color-picker::-webkit-color-swatch-wrapper { padding: 2px; }
+  .theme-color-picker::-webkit-color-swatch { border: none; border-radius: 3px; }
+  .theme-color-value { flex: 1; font-size: 0.75rem; padding: 0.3rem 0.5rem; }
+
   .settings-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

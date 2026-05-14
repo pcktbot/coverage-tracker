@@ -6,6 +6,7 @@
   import { orgs, activeOrg, refreshOrgs, refreshRepos, repos } from '$lib/stores/repos';
   import AICommandAside from '$lib/components/AICommandAside.svelte';
   import { getProject, getSettings, listAgentProfiles, listCachedConfluencePages, listProjects, setActiveOrg, type Settings, type AgentProfile, type ProjectSummary } from '$lib/api';
+  import { applyThemeSettings, loadThemeSettings } from '$lib/theme';
 
   let { children } = $props();
 
@@ -51,6 +52,7 @@
   }
 
   onMount(async () => {
+    applyThemeSettings(loadThemeSettings());
     const saved = localStorage.getItem(FONT_SIZE_KEY);
     if (saved) {
       fontSize = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Number(saved)));
