@@ -350,6 +350,50 @@ pub async fn unlink_session(
     Ok("ok")
 }
 
+pub async fn dismiss_session(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    let sid_clone = sid.clone();
+    Store::run(store, move |s| -> rusqlite::Result<()> {
+        s.set_dismissed_at(&sid, Some(ts), ts)?;
+        s.record_event(&sid, ts, "dismiss", "{}")?;
+        Ok(())
+    }).await.map_err(internal)?;
+    let label = state.store.get_session(&sid_clone).ok().flatten().and_then(|r| r.label);
+    state.bus.emit(crate::orchestrator::bus::StateChange {
+        session_id: sid_clone.clone(),
+        status: state.store.get_session(&sid_clone).ok().flatten().map(|r| r.status).unwrap_or_default(),
+        label,
+        reason: Some("dismissed".to_string()),
+    });
+    Ok("ok")
+}
+
+pub async fn undismiss_session(
+    State(state): State<Arc<AppState>>,
+    Path(sid): Path<String>,
+) -> Result<&'static str, (axum::http::StatusCode, String)> {
+    let ts = now();
+    let store = state.store.clone();
+    let sid_clone = sid.clone();
+    Store::run(store, move |s| -> rusqlite::Result<()> {
+        s.set_dismissed_at(&sid, None, ts)?;
+        s.record_event(&sid, ts, "undismiss", "{}")?;
+        Ok(())
+    }).await.map_err(internal)?;
+    let label = state.store.get_session(&sid_clone).ok().flatten().and_then(|r| r.label);
+    state.bus.emit(crate::orchestrator::bus::StateChange {
+        session_id: sid_clone.clone(),
+        status: state.store.get_session(&sid_clone).ok().flatten().map(|r| r.status).unwrap_or_default(),
+        label,
+        reason: Some("undismissed".to_string()),
+    });
+    Ok("ok")
+}
+
 // ---------- Admin: read-only DB browser ----------
 
 #[derive(serde::Deserialize)]
@@ -772,6 +816,26 @@ mod tests {
                    Some("first one"));
         assert_eq!(state.store.get_session("s1").unwrap().unwrap().last_user_prompt.as_deref(),
                    Some("second one"));
+    }
+
+    #[tokio::test]
+    async fn dismiss_then_undismiss_toggles_dismissed_at() {
+        let (app, state) = test_app();
+        state.store.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+
+        let resp = app.clone().oneshot(
+            Request::builder().method("POST").uri("/sessions/s1/dismiss")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.store.get_session("s1").unwrap().unwrap().dismissed_at.is_some());
+
+        let resp = app.oneshot(
+            Request::builder().method("DELETE").uri("/sessions/s1/dismiss")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.store.get_session("s1").unwrap().unwrap().dismissed_at.is_none());
     }
 
     #[test]

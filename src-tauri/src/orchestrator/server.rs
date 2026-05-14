@@ -22,6 +22,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/by-pid/{pid}", get(handlers::lookup_by_pid))
         .route("/sessions/{sid}/link",
                post(handlers::link_session).delete(handlers::unlink_session))
+        .route("/sessions/{sid}/dismiss",
+               post(handlers::dismiss_session).delete(handlers::undismiss_session))
         .route("/sessions/{sid}/transcript-tail", get(handlers::get_transcript_tail))
         .route("/events", get(handlers::list_events))
         .route("/artifacts", get(handlers::list_artifacts_h))
