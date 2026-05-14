@@ -99,3 +99,31 @@ export async function getTranscriptTail(sid: string, turns = 2): Promise<Transcr
   if (!r.ok) return [];
   return (await r.json()).turns ?? [];
 }
+
+export interface AdminRowsResponse {
+  db: string;
+  table: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+export async function adminListTables(db: 'orchestrator' | 'coverage'): Promise<string[]> {
+  const r = await fetch(`${BASE}/admin/tables?db=${db}`);
+  if (!r.ok) return [];
+  return (await r.json()).tables ?? [];
+}
+
+export async function adminListRows(
+  db: 'orchestrator' | 'coverage',
+  table: string,
+  limit = 100,
+  offset = 0,
+): Promise<AdminRowsResponse | null> {
+  const url = `${BASE}/admin/rows?db=${db}&table=${encodeURIComponent(table)}&limit=${limit}&offset=${offset}`;
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  return await r.json();
+}
