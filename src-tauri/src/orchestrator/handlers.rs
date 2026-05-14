@@ -61,6 +61,7 @@ pub async fn post_event(
             }
             EventBody::UserPromptSubmit { session_id, prompt, transcript_path } => {
                 store.set_last_user_prompt(&session_id, &prompt, ts)?;
+                store.set_first_user_prompt_if_null(&session_id, &prompt, ts)?;  // NEW
                 let ns = transition(&current_status(store, &session_id), &EventKind::UserPromptSubmit);
                 store.apply_status(&session_id, ns, ts, None)?;
                 store.record_event(&session_id, ts, "user_prompt",
@@ -743,6 +744,34 @@ mod tests {
                 .body(Body::empty()).unwrap()
         ).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn first_user_prompt_captured_on_first_submit_only() {
+        let (app, state) = test_app();
+        state.store.upsert_session_start("s1", Some("demo"), "/tmp", 1, 1).unwrap();
+
+        // First prompt
+        app.clone().oneshot(
+            Request::builder().method("POST").uri("/event")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"kind":"user_prompt_submit","session_id":"s1","prompt":"first one"}"#))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(state.store.get_session("s1").unwrap().unwrap().first_user_prompt.as_deref(),
+                   Some("first one"));
+
+        // Second prompt — first_user_prompt must not change
+        app.oneshot(
+            Request::builder().method("POST").uri("/event")
+                .header("content-type","application/json")
+                .body(Body::from(r#"{"kind":"user_prompt_submit","session_id":"s1","prompt":"second one"}"#))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(state.store.get_session("s1").unwrap().unwrap().first_user_prompt.as_deref(),
+                   Some("first one"));
+        assert_eq!(state.store.get_session("s1").unwrap().unwrap().last_user_prompt.as_deref(),
+                   Some("second one"));
     }
 
     #[test]
