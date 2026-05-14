@@ -67,7 +67,13 @@
   .filters { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .filters button { padding: 0.25rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); cursor: pointer; font: inherit; color: inherit; }
   .filters button.active { background: var(--accent-subtle); color: var(--accent); }
-  .rows { list-style: none; padding: 0; margin: 1rem 0; }
+  .rows {
+    list-style: none; padding: 0; margin: 1rem 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 600px));
+    gap: 1rem;
+    align-items: start;
+  }
   .rows li { list-style: none; }
-  .empty { padding: 1rem; color: var(--text-muted); font-style: italic; }
+  .empty { padding: 1rem; color: var(--text-muted); font-style: italic; grid-column: 1 / -1; }
 </style>

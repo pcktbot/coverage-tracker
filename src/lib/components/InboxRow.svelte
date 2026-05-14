@@ -55,15 +55,7 @@
     session.cwd.length > 40 ? '…' + session.cwd.slice(-39) : session.cwd
   );
 
-  // Title prefers first_user_prompt, falls back to label, falls back to id.
-  // Truncate to one visible line; full text revealed on click.
-  const titleFull = $derived(
-    session.first_user_prompt ?? session.label ?? session.id
-  );
-  const titleShort = $derived(
-    titleFull.length > 100 ? titleFull.slice(0, 100) + '…' : titleFull
-  );
-  const titleClickable = $derived(titleFull.length > 100);
+  const initialPrompt = $derived(session.first_user_prompt);
 
   const dotColor = $derived({
     working: '#3498db',
@@ -73,6 +65,15 @@
     error: '#e74c3c',
     unknown: '#7f8c8d',
   }[session.status]);
+
+  const statusLabel = $derived({
+    working: 'working',
+    idle: 'idle',
+    needs_input: 'needs input',
+    done: 'done',
+    error: 'error',
+    unknown: 'unknown',
+  }[session.status]);
 </script>
 
 <article class="row"
@@ -80,30 +81,15 @@
   class:dismissed={session.dismissed_at != null}
 >
   <header>
-    <span class="dot" style="background: {dotColor}" aria-label={session.status}></span>
-
-    {#if titleClickable}
-      <button
-        class="title-btn"
-        onclick={() => (promptOpen = !promptOpen)}
-        title={promptOpen ? 'Collapse' : 'Show full prompt'}
-        type="button"
-      >
-        <span class="chev-inline">{promptOpen ? '▼' : '▶'}</span>
-        {#if promptOpen}
-          <span class="title-full">{titleFull}</span>
-        {:else}
-          <span class="title-short">{titleShort}</span>
-        {/if}
-      </button>
-    {:else}
-      <span class="title-static">{titleFull}</span>
-    {/if}
+    <span class="status-pill" title={session.status}>
+      <span class="dot" style="background: {dotColor}"></span>
+      <span class="status-label">{statusLabel}</span>
+    </span>
 
     {#if session.artifact_kind}
       <span class="pill" title={session.artifact_url ?? ''}>
         <span class="kind">{kindLabel}</span>
-        <span class="title">{session.artifact_title ?? session.artifact_id}</span>
+        <span class="artifact-title">{session.artifact_title ?? session.artifact_id}</span>
       </span>
     {:else}
       <span class="pill muted">Unlinked</span>
@@ -112,11 +98,26 @@
     <span class="cwd" title={session.cwd}>{cwdShort}</span>
 
     {#if session.dismissed_at != null}
-      <button class="dismiss-btn" onclick={undismiss} type="button" title="Restore">↩ restore</button>
+      <button class="dismiss-btn" onclick={undismiss} type="button" title="Restore">↩</button>
     {:else}
       <button class="dismiss-btn" onclick={dismiss} type="button" title="Dismiss">✕</button>
     {/if}
   </header>
+
+  {#if initialPrompt}
+    <section>
+      <h4>Initial prompt</h4>
+      <button
+        type="button"
+        class="initial-prompt-wrap"
+        class:expanded={promptOpen}
+        onclick={() => (promptOpen = !promptOpen)}
+        title={promptOpen ? 'Collapse' : 'Expand'}
+      >
+        <pre class="initial-prompt">{initialPrompt}</pre>
+      </button>
+    </section>
+  {/if}
 
   {#if session.last_user_prompt}
     <section>
@@ -186,43 +187,65 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 1rem;
-    margin-bottom: 1rem;
     background: var(--bg);
   }
   .row.needs-input { border-left: 3px solid #f39c12; }
   .row.dismissed { opacity: 0.55; }
 
-  header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  header { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   h4 { margin: 0 0 0.25rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
-  .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
-  .title-btn {
-    flex: 1 1 auto; min-width: 0;
-    display: inline-flex; align-items: center; gap: 0.25rem;
-    background: none; border: none; padding: 0;
-    text-align: left; font: inherit; color: inherit;
-    cursor: pointer;
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    background: var(--bg-muted); padding: 0.125rem 0.5rem;
+    border-radius: 999px; font-size: 0.75rem; font-weight: 600;
   }
-  .title-static { flex: 1 1 auto; min-width: 0; font-size: 1rem; font-weight: 600; }
-  .title-short {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: 1rem; font-weight: 600;
-  }
-  .title-full { font-size: 1rem; font-weight: 600; white-space: pre-wrap; }
-  .chev-inline { color: var(--text-muted); font-size: 0.75rem; }
+  .status-label { text-transform: lowercase; }
 
-  .cwd { color: var(--text-muted); font-size: 0.8125rem; font-family: var(--font-mono, monospace); }
-  .pill { background: var(--bg-muted); padding: 0.125rem 0.5rem; border-radius: 999px; font-size: 0.75rem; display: inline-flex; gap: 0.25rem; }
+  .pill { background: var(--bg-muted); padding: 0.125rem 0.5rem; border-radius: 999px; font-size: 0.75rem; display: inline-flex; gap: 0.25rem; max-width: 100%; min-width: 0; }
   .pill.muted { color: var(--text-muted); }
   .pill .kind { font-weight: 600; }
-  .pill .title { font-size: 0.75rem; font-weight: 400; }
+  .pill .artifact-title { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+  .cwd {
+    color: var(--text-muted); font-size: 0.75rem;
+    font-family: var(--font-mono, monospace);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1 1 auto; min-width: 0;
+  }
 
   .dismiss-btn {
     background: none; border: 1px solid var(--border); color: var(--text-muted);
     padding: 0.0625rem 0.4rem; border-radius: var(--radius-sm);
     cursor: pointer; font: inherit; font-size: 0.75rem;
+    flex-shrink: 0;
   }
   .dismiss-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+  .initial-prompt-wrap {
+    display: block; width: 100%;
+    background: none; border: none; padding: 0; margin: 0;
+    text-align: left; font: inherit; color: inherit;
+    cursor: pointer;
+  }
+  .initial-prompt {
+    margin: 0; padding: 0.5rem 0.6rem;
+    background: var(--bg-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.8125rem; line-height: 1.4;
+    white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+    max-height: 5.2em; overflow: hidden;
+    position: relative;
+  }
+  .initial-prompt-wrap:not(.expanded) .initial-prompt::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1.5em;
+    background: linear-gradient(transparent, var(--bg-muted));
+    pointer-events: none;
+  }
+  .initial-prompt-wrap.expanded .initial-prompt { max-height: none; }
 
   section { margin-top: 0.75rem; }
   .prompt { background: var(--bg-muted); padding: 0.5rem; border-radius: var(--radius-sm); margin: 0; font-size: 0.875rem; }
