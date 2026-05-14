@@ -324,9 +324,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_three() {
+    fn schema_version_is_four() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 4);
     }
 
     #[test]
@@ -362,10 +362,10 @@ mod tests {
         assert!(row.2.is_none());
         assert!(row.3.is_none());
 
-        // schema_version row should reflect v3 (the current schema version).
+        // schema_version row should reflect v4 (the current schema version).
         let v: i64 = conn.query_row(
             "SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 
     #[test]
