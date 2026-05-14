@@ -27,6 +27,9 @@ pub struct SessionRow {
     pub artifact_url: Option<String>,
     // NEW (Schema v3)
     pub loaded_snapshot: Option<String>,
+    // NEW (Schema v4)
+    pub first_user_prompt: Option<String>,
+    pub dismissed_at: Option<i64>,
 }
 
 impl Store {
@@ -82,7 +85,7 @@ impl Store {
             "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
                     started_at,updated_at,ended_at,end_reason,
                     transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url,
-                    loaded_snapshot
+                    loaded_snapshot,first_user_prompt,dismissed_at
              FROM sessions WHERE id=?",
             params![id],
             |r| Ok(SessionRow {
@@ -93,6 +96,7 @@ impl Store {
                 transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
                 artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
                 loaded_snapshot: r.get(17)?,
+                first_user_prompt: r.get(18)?, dismissed_at: r.get(19)?,
             }),
         ).optional()
     }
@@ -152,6 +156,23 @@ impl Store {
         conn.execute(
             "UPDATE sessions SET loaded_snapshot=?, updated_at=? WHERE id=?",
             params![snapshot, now, sid])?;
+        Ok(())
+    }
+
+    pub fn set_first_user_prompt_if_null(&self, sid: &str, prompt: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET first_user_prompt = ?, updated_at = ?
+             WHERE id = ? AND first_user_prompt IS NULL",
+            params![prompt, now, sid])?;
+        Ok(())
+    }
+
+    pub fn set_dismissed_at(&self, sid: &str, value: Option<i64>, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET dismissed_at = ?, updated_at = ? WHERE id = ?",
+            params![value, now, sid])?;
         Ok(())
     }
 
@@ -222,7 +243,7 @@ impl Store {
             "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
                     started_at,updated_at,ended_at,end_reason,
                     transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url,
-                    loaded_snapshot
+                    loaded_snapshot,first_user_prompt,dismissed_at
              FROM sessions ORDER BY updated_at DESC")?;
         let rows: Vec<SessionRow> = stmt.query_map([], |r| Ok(SessionRow {
             id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
@@ -232,6 +253,7 @@ impl Store {
             transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
             artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
             loaded_snapshot: r.get(17)?,
+            first_user_prompt: r.get(18)?, dismissed_at: r.get(19)?,
         }))?.collect::<Result<Vec<_>,_>>()?;
         Ok(rows)
     }
@@ -402,5 +424,35 @@ mod tests {
         s.set_loaded_snapshot("s1", r#"{"plugins":["a"]}"#, 2).unwrap();
         let row = s.get_session("s1").unwrap().unwrap();
         assert_eq!(row.loaded_snapshot.as_deref(), Some(r#"{"plugins":["a"]}"#));
+    }
+
+    #[test]
+    fn first_user_prompt_persists_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_first_user_prompt_if_null("s1", "hello world", 2).unwrap();
+        let row = s.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.first_user_prompt.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn first_user_prompt_is_write_once() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_first_user_prompt_if_null("s1", "initial", 2).unwrap();
+        s.set_first_user_prompt_if_null("s1", "second attempt", 3).unwrap();
+        let row = s.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.first_user_prompt.as_deref(), Some("initial"),
+            "set_first_user_prompt_if_null must not overwrite an existing value");
+    }
+
+    #[test]
+    fn dismissed_at_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_dismissed_at("s1", Some(42), 2).unwrap();
+        assert_eq!(s.get_session("s1").unwrap().unwrap().dismissed_at, Some(42));
+        s.set_dismissed_at("s1", None, 3).unwrap();
+        assert!(s.get_session("s1").unwrap().unwrap().dismissed_at.is_none());
     }
 }
