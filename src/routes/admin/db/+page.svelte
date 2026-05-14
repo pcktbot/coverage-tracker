@@ -11,7 +11,6 @@
   let page = $state(0);
   const pageSize = 100;
   let loading = $state(false);
-  let expanded = $state<Record<string, boolean>>({});
 
   async function refreshTables() {
     tables = await adminListTables(which);
@@ -41,10 +40,6 @@
     if (v === null || v === undefined) return '∅';
     if (typeof v === 'string') return v;
     return JSON.stringify(v);
-  }
-
-  function cellKey(rowIdx: number, col: string): string {
-    return `${rowIdx}:${col}`;
   }
 
   const totalPages = $derived(data ? Math.max(1, Math.ceil(data.total / pageSize)) : 0);
@@ -97,23 +92,10 @@
         </tr>
       </thead>
       <tbody>
-        {#each data.rows as row, i}
+        {#each data.rows as row, i (i)}
           <tr>
             {#each data.columns as c}
-              {@const raw = fmt(row[c])}
-              {@const key = cellKey(i, c)}
-              {@const long = raw.length > 80}
-              <td class:long>
-                {#if long && !expanded[key]}
-                  <span class="trunc">{raw.slice(0, 80)}…</span>
-                  <button class="more" onclick={() => expanded[key] = true} type="button">expand</button>
-                {:else if long}
-                  <pre class="full">{raw}</pre>
-                  <button class="more" onclick={() => expanded[key] = false} type="button">collapse</button>
-                {:else}
-                  {raw}
-                {/if}
-              </td>
+              <td>{fmt(row[c])}</td>
             {/each}
           </tr>
         {/each}
@@ -135,9 +117,5 @@
   .grid-wrap { overflow: auto; margin-top: 1rem; max-height: calc(100vh - 200px); border: 1px solid var(--border); border-radius: var(--radius-sm); }
   .grid { border-collapse: collapse; width: 100%; font-size: 0.8125rem; font-family: var(--font-mono, monospace); }
   .grid th { position: sticky; top: 0; background: var(--bg-muted); padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .grid td { padding: 0.25rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; max-width: 480px; }
-  .grid td.long { background: color-mix(in srgb, var(--bg-muted) 30%, transparent); }
-  .trunc { white-space: nowrap; }
-  .full { margin: 0; white-space: pre-wrap; word-wrap: break-word; max-height: 240px; overflow: auto; background: var(--bg); padding: 0.4rem; border-radius: var(--radius-sm); }
-  .more { font-size: 0.75rem; padding: 0.0625rem 0.4rem; margin-left: 0.25rem; }
+  .grid td { padding: 0.25rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; max-width: 480px; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 </style>
