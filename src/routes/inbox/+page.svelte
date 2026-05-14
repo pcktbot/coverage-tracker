@@ -4,8 +4,8 @@
   import InboxRow from '$lib/components/InboxRow.svelte';
   import { listSessions, type Session, type SessionStatus } from '$lib/orchestrator';
 
-  type Filter = 'all' | 'needs_input' | SessionStatus;
-  const FILTERS: Filter[] = ['needs_input', 'all', 'working', 'idle', 'done', 'error'];
+  type Filter = 'all' | 'needs_input' | 'dismissed' | SessionStatus;
+  const FILTERS: Filter[] = ['needs_input', 'all', 'working', 'idle', 'done', 'error', 'dismissed'];
 
   let sessions = $state<Session[]>([]);
   let filter = $state<Filter>('needs_input');
@@ -22,7 +22,14 @@
   onDestroy(() => { unlisten?.(); });
 
   const visible = $derived.by(() => {
-    const filtered = filter === 'all' ? sessions : sessions.filter((s) => s.status === filter);
+    const showingDismissed = filter === 'dismissed';
+    const base = sessions.filter((s) => {
+      const isDismissed = s.dismissed_at != null;
+      return showingDismissed ? isDismissed : !isDismissed;
+    });
+    const filtered = (filter === 'all' || filter === 'dismissed')
+      ? base
+      : base.filter((s) => s.status === filter);
     return [...filtered].sort((a, b) => {
       if (a.status === 'needs_input' && b.status !== 'needs_input') return -1;
       if (b.status === 'needs_input' && a.status !== 'needs_input') return 1;
@@ -30,7 +37,9 @@
     });
   });
 
-  const needsInputCount = $derived(sessions.filter((s) => s.status === 'needs_input').length);
+  const needsInputCount = $derived(
+    sessions.filter((s) => s.status === 'needs_input' && s.dismissed_at == null).length
+  );
 </script>
 
 <header class="bar">
@@ -44,7 +53,7 @@
 
 <ul class="rows">
   {#each visible as s (s.id)}
-    <li><InboxRow session={s} /></li>
+    <li><InboxRow session={s} onChange={refresh} /></li>
   {/each}
   {#if visible.length === 0}
     <li class="empty">No sessions match.</li>
@@ -55,7 +64,7 @@
   .bar { display: flex; align-items: baseline; gap: 1rem; }
   h1 { margin: 0; }
   .badge { background: #f39c12; color: white; border-radius: 999px; font-size: 0.75rem; padding: 0.125rem 0.5rem; margin-left: 0.25rem; vertical-align: middle; }
-  .filters { display: flex; gap: 0.25rem; }
+  .filters { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .filters button { padding: 0.25rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg); cursor: pointer; font: inherit; color: inherit; }
   .filters button.active { background: var(--accent-subtle); color: var(--accent); }
   .rows { list-style: none; padding: 0; margin: 1rem 0; }
