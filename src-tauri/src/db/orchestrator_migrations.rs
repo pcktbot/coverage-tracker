@@ -7,20 +7,18 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);"
     )?;
+    // Always run every upgrade step. Each is idempotent (column_exists / IF NOT EXISTS
+    // guards), so re-running is cheap and lets us self-heal when the schema_version
+    // row drifts from the actual schema (e.g. partial migration, killed mid-run).
+    create_v1(conn)?;
+    upgrade_v1_to_v2(conn)?;
+    upgrade_v2_to_v3(conn)?;
+
+    // Reconcile the version marker after the upgrades have taken effect.
     let current: i64 = conn
         .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
-        .unwrap_or(0);
-    let mut version = current;
-    loop {
-        match version {
-            0 => { create_v1(conn)?; version = 1; }
-            1 => { upgrade_v1_to_v2(conn)?; version = 2; }
-            2 => { upgrade_v2_to_v3(conn)?; version = 3; }
-            3 => break,
-            other => panic!("unknown schema version: {other} — upgrade orchestrator binary"),
-        }
-    }
-    if current == 0 {
+        .unwrap_or(-1);
+    if current == -1 {
         conn.execute("INSERT INTO schema_version(version) VALUES (?)", [SCHEMA_VERSION])?;
     } else if current != SCHEMA_VERSION {
         conn.execute("UPDATE schema_version SET version=?", [SCHEMA_VERSION])?;
@@ -62,6 +60,27 @@ mod migration_tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         assert!(column_exists(&conn, "sessions", "loaded_snapshot").unwrap());
+    }
+
+    #[test]
+    fn migrate_repairs_drifted_schema() {
+        // Reproduce the production bug: schema_version says 3 but the column is missing.
+        let conn = Connection::open_in_memory().unwrap();
+        create_v1(&conn).unwrap();
+        upgrade_v1_to_v2(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);"
+        ).unwrap();
+        conn.execute("INSERT INTO schema_version(version) VALUES (3)", []).unwrap();
+        // Note: NO loaded_snapshot column yet.
+
+        assert!(!column_exists(&conn, "sessions", "loaded_snapshot").unwrap(),
+            "test precondition: column should not yet exist");
+
+        migrate(&conn).unwrap();
+
+        assert!(column_exists(&conn, "sessions", "loaded_snapshot").unwrap(),
+            "migrate() must self-heal when schema_version drifts from real schema");
     }
 
     #[test]
