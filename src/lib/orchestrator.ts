@@ -23,6 +23,8 @@ export interface Session {
   artifact_title: string | null;
   artifact_url: string | null;
   loaded_snapshot: string | null;
+  first_user_prompt: string | null;
+  dismissed_at: number | null;
 }
 
 export interface LinkBody {
@@ -92,6 +94,16 @@ export async function unlinkArtifact(sid: string): Promise<void> {
     method: 'DELETE'
   });
   if (!r.ok) throw new Error(`unlinkArtifact ${r.status}`);
+}
+
+export async function dismissSession(sid: string): Promise<void> {
+  const r = await fetch(`${BASE}/sessions/${encodeURIComponent(sid)}/dismiss`, { method: 'POST' });
+  if (!r.ok) throw new Error(`dismissSession ${r.status}`);
+}
+
+export async function undismissSession(sid: string): Promise<void> {
+  const r = await fetch(`${BASE}/sessions/${encodeURIComponent(sid)}/dismiss`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`undismissSession ${r.status}`);
 }
 
 export async function getTranscriptTail(sid: string, turns = 2): Promise<TranscriptTurn[]> {
