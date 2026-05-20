@@ -15,6 +15,8 @@ pub enum EventBody {
     PreToolUse { session_id: String, tool: String, transcript_path: Option<String> },
     Notification { session_id: String, message: String, transcript_path: Option<String> },
     Stop { session_id: String, error: Option<bool>, reason: Option<String>, transcript_path: Option<String> },
+    WorkflowPhaseChanged { session_id: String, payload: serde_json::Value },
+    EvalResult { session_id: String, payload: serde_json::Value },
 }
 
 pub(crate) fn now() -> i64 {
@@ -102,6 +104,14 @@ pub async fn post_event(
                     store.set_transcript_path(&session_id, tp, ts)?;
                 }
                 Ok((session_id, ns, reason))
+            }
+            EventBody::WorkflowPhaseChanged { session_id, payload } => {
+                store.record_event(&session_id, ts, "workflow_phase_changed", &payload.to_string())?;
+                Ok((session_id, "working", None))
+            }
+            EventBody::EvalResult { session_id, payload } => {
+                store.record_event(&session_id, ts, "eval_result", &payload.to_string())?;
+                Ok((session_id, "working", None))
             }
         }
     }).await.map_err(internal)?;
