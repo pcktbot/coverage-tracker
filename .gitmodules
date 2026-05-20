@@ -1,0 +1,3 @@
+[submodule "pipeline-service"]
+	path = pipeline-service
+	url = /Users/david.miller/Documents/current/pipeline-service
