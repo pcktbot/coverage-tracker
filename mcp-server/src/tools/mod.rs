@@ -1,7 +1,23 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+const MAX_DOC_SIZE_BYTES: u64 = 512 * 1024;
+const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".next",
+    ".svelte-kit",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "tmp",
+    "vendor",
+];
 
 pub fn open_db() -> Result<Connection> {
     let path = if let Ok(p) = std::env::var("COVERAGE_DB_PATH") {
@@ -190,4 +206,285 @@ fn map_file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "repo": row.get::<_, String>(5)?,
         "org": row.get::<_, String>(6)?,
     }))
+}
+
+pub fn list_repo_docs(conn: &Connection, args: &Value) -> Result<Value> {
+    let root = resolve_repo_root(
+        conn,
+        required_str(args, "repo_name")?,
+        args.get("org").and_then(|v| v.as_str()),
+    )?;
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let runbooks_only = args.get("runbooks_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let docs = scan_repo_docs(&root, query, runbooks_only)?;
+    Ok(json!(docs))
+}
+
+pub fn read_repo_doc(conn: &Connection, args: &Value) -> Result<Value> {
+    let root = resolve_repo_root(
+        conn,
+        required_str(args, "repo_name")?,
+        args.get("org").and_then(|v| v.as_str()),
+    )?;
+    let path = required_str(args, "path")?;
+    Ok(read_doc(&root, path)?)
+}
+
+pub fn search_repo_docs(conn: &Connection, args: &Value) -> Result<Value> {
+    let pattern = required_str(args, "pattern")?;
+    let runbooks_only = args.get("runbooks_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let repo_name = args.get("repo_name").and_then(|v| v.as_str());
+    let org = args.get("org").and_then(|v| v.as_str());
+
+    if let Some(repo_name) = repo_name {
+        let root = resolve_repo_root(conn, repo_name, org)?;
+        let docs = scan_repo_docs(&root, pattern, runbooks_only)?;
+        return Ok(json!(docs));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT org, name, local_path
+         FROM repos
+         WHERE local_path IS NOT NULL
+         ORDER BY org, name"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let (repo_org, repo_name, local_path) = row?;
+        let root = PathBuf::from(local_path);
+        for doc in scan_repo_docs(&root, pattern, runbooks_only)? {
+            results.push(json!({
+                "org": repo_org,
+                "repo": repo_name,
+                "path": doc.get("path").cloned().unwrap_or(Value::Null),
+                "title": doc.get("title").cloned().unwrap_or(Value::Null),
+                "preview": doc.get("preview").cloned().unwrap_or(Value::Null),
+                "is_runbook": doc.get("is_runbook").cloned().unwrap_or(Value::Bool(false)),
+                "modified_at": doc.get("modified_at").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+
+    Ok(json!(results))
+}
+
+fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("{key} is required"))
+}
+
+fn resolve_repo_root(conn: &Connection, repo_name: &str, org: Option<&str>) -> Result<PathBuf> {
+    let local_path: String = if let Some(org) = org {
+        conn.query_row(
+            "SELECT local_path FROM repos WHERE name = ?1 AND org = ?2 AND local_path IS NOT NULL LIMIT 1",
+            rusqlite::params![repo_name, org],
+            |r| r.get(0),
+        )?
+    } else {
+        conn.query_row(
+            "SELECT local_path FROM repos WHERE name = ?1 AND local_path IS NOT NULL LIMIT 1",
+            rusqlite::params![repo_name],
+            |r| r.get(0),
+        )?
+    };
+    Ok(PathBuf::from(local_path))
+}
+
+fn scan_repo_docs(root: &Path, query: &str, runbooks_only: bool) -> Result<Vec<Value>> {
+    let root = root.canonicalize()?;
+    let mut files = Vec::new();
+    collect_markdown_files(&root, &root, &mut files)?;
+    let query = query.trim().to_lowercase();
+    let mut docs = Vec::new();
+
+    for path in files {
+        let rel = relative_path(&root, &path);
+        let is_runbook = classify_runbook(&rel);
+        if runbooks_only && !is_runbook {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let title = extract_title(&rel, &content);
+        if !query.is_empty() {
+            let haystack = format!(
+                "{}\n{}\n{}",
+                rel.to_lowercase(),
+                title.to_lowercase(),
+                content.to_lowercase()
+            );
+            if !haystack.contains(&query) {
+                continue;
+            }
+        }
+
+        let modified_at = fs::metadata(&path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(|time| DateTime::<Utc>::from(time).to_rfc3339());
+
+        docs.push(json!({
+            "path": rel,
+            "title": title,
+            "preview": build_preview(&content, &query),
+            "is_runbook": is_runbook,
+            "modified_at": modified_at,
+        }));
+    }
+
+    docs.sort_by(|a, b| {
+        let a_runbook = a.get("is_runbook").and_then(|v| v.as_bool()).unwrap_or(false);
+        let b_runbook = b.get("is_runbook").and_then(|v| v.as_bool()).unwrap_or(false);
+        let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        b_runbook.cmp(&a_runbook)
+            .then_with(|| a_path.len().cmp(&b_path.len()))
+            .then_with(|| a_path.cmp(b_path))
+    });
+
+    Ok(docs)
+}
+
+fn read_doc(root: &Path, relative: &str) -> Result<Value> {
+    let root = root.canonicalize()?;
+    let safe_relative = sanitize_relative_path(relative)?;
+    let path = root.join(&safe_relative);
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(&root) {
+        anyhow::bail!("Doc path escapes repo root");
+    }
+
+    let markdown = fs::read_to_string(&canonical)?;
+    let rel = relative_path(&root, &canonical);
+    let modified_at = fs::metadata(&canonical)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .map(|time| DateTime::<Utc>::from(time).to_rfc3339());
+
+    Ok(json!({
+        "path": rel,
+        "title": extract_title(&rel, &markdown),
+        "markdown": markdown,
+        "is_runbook": classify_runbook(&rel),
+        "modified_at": modified_at,
+    }))
+}
+
+fn collect_markdown_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if IGNORED_DIRS.iter().any(|ignored| ignored.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
+            collect_markdown_files(root, &path, files)?;
+            continue;
+        }
+
+        if !file_type.is_file() || !is_markdown_file(&path) {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if metadata.len() > MAX_DOC_SIZE_BYTES {
+            continue;
+        }
+        if path.strip_prefix(root).is_ok() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_markdown_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "mdx" | "markdown"))
+        .unwrap_or(false)
+}
+
+fn classify_runbook(relative: &str) -> bool {
+    let lower = relative.to_lowercase();
+    lower.contains("runbook") || lower.contains("/runbooks/") || lower.starts_with("runbooks/")
+}
+
+fn extract_title(relative: &str, content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("# ") {
+            if !title.trim().is_empty() {
+                return title.trim().to_string();
+            }
+        }
+    }
+    Path::new(relative)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| name.replace(['-', '_'], " "))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| relative.to_string())
+}
+
+fn build_preview(content: &str, query: &str) -> String {
+    if !query.is_empty() {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && trimmed.to_lowercase().contains(query) {
+                return trimmed.chars().take(180).collect();
+            }
+        }
+    }
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        return trimmed.chars().take(180).collect();
+    }
+    "No preview available.".into()
+}
+
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn sanitize_relative_path(path: &str) -> Result<PathBuf> {
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        anyhow::bail!("Absolute doc paths are not allowed");
+    }
+    for component in candidate.components() {
+        if matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)) {
+            anyhow::bail!("Invalid doc path");
+        }
+    }
+    Ok(candidate)
 }

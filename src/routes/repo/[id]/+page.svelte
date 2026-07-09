@@ -13,13 +13,14 @@
     runCoverage,
     cloneOrPullRepo,
     openInTerminal,
-    readEnvFile,
-    writeEnvFile,
     exportCsv,
     downloadCsv,
+    getRepoSources,
+    saveRepoSources,
     type CoverageRun,
     type FileCoverage,
     type CoverageTrendPoint,
+    type RepoSources,
   } from '$lib/api';
 
   let repoId = $derived(Number($page.params.id));
@@ -38,16 +39,21 @@
   let runLogKey = $state(0);
   let lastRunFailed = $state(false);
   let selectedRun = $derived(runs.find(r => r.id === selectedRunId));
-
-  // Env editor
-  let envOpen = $state(false);
-  let envContent = $state('');
-  let envOriginal = $state('');
-  let envLoading = $state(false);
-  let envSaving = $state(false);
-  let envSaved = $state(false);
-  let envError = $state('');
-  let envDirty = $derived(envContent !== envOriginal);
+  let sources = $state<RepoSources>({
+    repo_id: 0,
+    platform_name: '',
+    tfs_project: '',
+    tfs_area_path: '',
+    tfs_team: '',
+    tfs_release_definition: '',
+    confluence_space_key: '',
+    confluence_parent_page_id: '',
+    confluence_site_label: '',
+    notes: '',
+  });
+  let sourcesSaving = $state(false);
+  let sourcesSaved = $state(false);
+  let sourcesError = $state('');
 
   onMount(() => {
     const id = repoId;
@@ -64,10 +70,11 @@
     error = '';
     console.log('[repo-page] load() starting for id=', id);
     try {
-      const [r, t] = await Promise.all([listRuns(id), getTrend(id, 20)]);
+      const [r, t, repoSources] = await Promise.all([listRuns(id), getTrend(id, 20), getRepoSources(id)]);
       console.log('[repo-page] load() got', r.length, 'runs,', t.length, 'trend points');
       runs = r;
       trend = t;
+      sources = { ...repoSources, repo_id: id };
       if (r.length > 0) {
         selectedRunId = r[0].id;
         files = await getFileCoverage(r[0].id);
@@ -163,40 +170,18 @@
     return new Date(iso).toLocaleString();
   }
 
-  function toggleEnv() {
-    envOpen = !envOpen;
-    if (envOpen && !envContent) {
-      loadEnv();
-    }
-  }
-
-  async function loadEnv() {
-    envLoading = true;
-    envError = '';
+  async function saveSources() {
+    sourcesSaving = true;
+    sourcesError = '';
+    sourcesSaved = false;
     try {
-      const content = await readEnvFile(repoId);
-      envContent = content;
-      envOriginal = content;
+      await saveRepoSources({ ...sources, repo_id: repoId });
+      sourcesSaved = true;
+      setTimeout(() => (sourcesSaved = false), 2000);
     } catch (e: any) {
-      envError = e.message;
+      sourcesError = e.message;
     } finally {
-      envLoading = false;
-    }
-  }
-
-  async function saveEnv() {
-    envSaving = true;
-    envError = '';
-    envSaved = false;
-    try {
-      await writeEnvFile(repoId, envContent);
-      envOriginal = envContent;
-      envSaved = true;
-      setTimeout(() => (envSaved = false), 2000);
-    } catch (e: any) {
-      envError = e.message;
-    } finally {
-      envSaving = false;
+      sourcesSaving = false;
     }
   }
 
@@ -277,6 +262,7 @@
     {/if}
   </div>
   <div class="header-actions">
+    <a class="btn-secondary docs-link" href={`/docs?leftRepo=${repoId}`}>Docs</a>
     <button class="btn-secondary" onclick={doPull} disabled={running || pulling}>
       {pulling ? 'Pulling…' : 'Pull'}
     </button>
@@ -326,6 +312,62 @@
     <pre class="error-detail">{selectedRun.error_message}</pre>
   </div>
 {/if}
+
+<div class="section card source-card">
+  <div class="source-header">
+    <div>
+      <h2>Connected sources</h2>
+      <p class="text-muted" style="margin:0.25rem 0 0;font-size:0.8125rem">Loose mappings for future blended views across TFS work, releases, repo docs, and Confluence.</p>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.5rem">
+      {#if sourcesSaved}<span class="badge badge-green">Saved</span>{/if}
+      <button class="btn-secondary" onclick={saveSources} disabled={sourcesSaving}>
+        {sourcesSaving ? 'Saving…' : 'Save links'}
+      </button>
+    </div>
+  </div>
+  {#if sourcesError}
+    <div class="error-msg" style="margin-bottom:0.75rem">{sourcesError}</div>
+  {/if}
+  <div class="source-grid">
+    <div class="form-group">
+      <label for="platform-name">Platform / domain</label>
+      <input id="platform-name" bind:value={sources.platform_name} placeholder="payments-platform" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-project">TFS project</label>
+      <input id="tfs-project" bind:value={sources.tfs_project} placeholder="Commerce" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-team">TFS team</label>
+      <input id="tfs-team" bind:value={sources.tfs_team} placeholder="Checkout" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-area">TFS area path</label>
+      <input id="tfs-area" bind:value={sources.tfs_area_path} placeholder="Commerce\\Checkout" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-release">TFS release definition</label>
+      <input id="tfs-release" bind:value={sources.tfs_release_definition} placeholder="checkout-service-prod" />
+    </div>
+    <div class="form-group">
+      <label for="conf-space">Confluence space key</label>
+      <input id="conf-space" bind:value={sources.confluence_space_key} placeholder="PLAT" />
+    </div>
+    <div class="form-group">
+      <label for="conf-parent">Confluence parent page ID</label>
+      <input id="conf-parent" bind:value={sources.confluence_parent_page_id} placeholder="123456789" />
+    </div>
+    <div class="form-group">
+      <label for="conf-site">Confluence site label</label>
+      <input id="conf-site" bind:value={sources.confluence_site_label} placeholder="platform-ops" />
+    </div>
+  </div>
+  <div class="form-group" style="margin-bottom:0">
+    <label for="source-notes">Notes</label>
+    <textarea id="source-notes" class="source-notes" bind:value={sources.notes} rows="3" placeholder="Loose context for blended repo/platform/ticket/doc views."></textarea>
+  </div>
+</div>
 
 <!-- Coverage data: run history + file coverage (primary content) -->
 <div class="two-col">
@@ -430,38 +472,6 @@
   </div>
 {/if}
 
-<!-- Env editor (collapsible, secondary) -->
-<div class="section">
-  <button class="env-toggle" onclick={toggleEnv}>
-    <span class="env-chevron" class:open={envOpen}>&#9654;</span>
-    <h2 style="display:inline;margin:0">.env.test</h2>
-  </button>
-  {#if envOpen}
-    {#if envLoading}
-      <p class="text-muted" style="padding:0.5rem 0">Loading…</p>
-    {:else}
-      {#if envError}
-        <div class="error-msg" style="margin-bottom:0.5rem">{envError}</div>
-      {/if}
-      <textarea
-        class="env-editor"
-        bind:value={envContent}
-        spellcheck="false"
-        placeholder="# KEY=value"
-        rows="10"
-      ></textarea>
-      <div class="env-actions">
-        <button class="btn-primary" onclick={saveEnv} disabled={envSaving || !envDirty}>
-          {envSaving ? 'Saving…' : 'Save .env.test'}
-        </button>
-        <button class="btn-ghost" onclick={loadEnv} disabled={envLoading}>Reload</button>
-        {#if envSaved}<span class="badge badge-green">Saved!</span>{/if}
-        {#if envDirty}<span class="text-muted" style="font-size:0.75rem">unsaved changes</span>{/if}
-      </div>
-    {/if}
-  {/if}
-</div>
-
 {/if} <!-- end !loading -->
 
 <style>
@@ -476,7 +486,36 @@
   }
   .back-btn:hover { color: var(--accent); text-decoration: none; }
   .header-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+  .docs-link {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+  }
+  .docs-link:hover { text-decoration: none; }
   .section { margin-bottom: 1rem; }
+  .source-card { padding: 1rem; }
+  .source-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+  }
+  .source-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+  .source-notes {
+    width: 100%;
+    font-family: var(--font);
+    font-size: 0.875rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.625rem;
+    resize: vertical;
+    min-height: 90px;
+  }
   .two-col { display: grid; grid-template-columns: 280px 1fr; gap: 1rem; min-width: 0; }
   .two-col > * { min-width: 0; overflow: hidden; }
   tr.selected td { background: var(--accent-subtle); }
@@ -513,39 +552,17 @@
   }
   .uncovered-label { color: var(--danger); font-weight: 500; margin-right: 0.5rem; }
   .uncovered-ranges { color: var(--text-secondary); word-break: break-all; }
+  @media (max-width: 1100px) {
+    .source-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
   @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
   @media (max-width: 600px) {
     .detail-header { flex-direction: column; }
     .header-actions { width: 100%; justify-content: flex-start; }
+    .source-header,
+    .source-grid { grid-template-columns: 1fr; }
+    .source-header { flex-direction: column; }
   }
-
-  /* Env editor */
-  .env-toggle {
-    background: none; border: none; padding: 0; cursor: pointer;
-    display: flex; align-items: center; gap: 0.5rem;
-    color: var(--text-primary);
-  }
-  .env-toggle:hover h2 { color: var(--accent); }
-  .env-chevron {
-    font-size: 0.625rem; transition: transform 0.15s; display: inline-block;
-  }
-  .env-chevron.open { transform: rotate(90deg); }
-  .env-editor {
-    width: 100%;
-    font-family: var(--font-mono);
-    font-size: 0.8125rem;
-    line-height: 1.5;
-    padding: 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-subtle);
-    color: var(--text-primary);
-    resize: vertical;
-    tab-size: 4;
-    margin-top: 0.5rem;
-  }
-  .env-editor:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .env-actions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
 
   /* Error detail */
   .error-detail {

@@ -4,11 +4,40 @@
   import { orgs, activeOrg, repos, refreshOrgs, refreshRepos } from '$lib/stores/repos';
   import {
     getSettings, saveSettings, addOrg, removeOrg, setActiveOrg,
-    syncOrgRepos, setRepoEnabled,
-    type Settings,
+    syncOrgRepos, setRepoEnabled, diagnoseGithubAuth,
+    createAgentProfile, deleteAgentProfile, listAgentProfiles, saveAgentProfile,
+    adoPreview,
+    type Settings, type GithubAuthDiagnostics, type AgentProfile, type AdoPreview,
   } from '$lib/api';
+  import {
+    THEME_FIELDS,
+    loadThemeSettings,
+    applyThemeSettings,
+    setThemeColor,
+    resetThemeSettings,
+    type ThemeKey,
+    type ThemeSettings,
+  } from '$lib/theme';
 
-  let settings = $state<Settings>({ github_token: '', clone_root: '' });
+  let settings = $state<Settings>({
+    github_token: '',
+    clone_root: '',
+    tfs_base_url: '',
+    tfs_pat: '',
+    tfs_collection: '',
+    tfs_default_project: 'Consumer Solutions',
+    tfs_default_area_path: 'MKT-Websites',
+    confluence_base_url: '',
+    confluence_username: '',
+    confluence_token: '',
+    microsoft_tenant_id: '',
+    microsoft_client_id: '',
+    microsoft_client_secret: '',
+    mcp_enabled: true,
+    anthropic_api_key: '',
+    anthropic_model: 'claude-sonnet-4-5',
+    ai_system_prompt: 'Focus on prioritization, blockers, missing context, and next checks.',
+  });
   let saved = $state(false);
   let saving = $state(false);
   let error = $state('');
@@ -22,6 +51,50 @@
   let syncProgress = $state<{ done: number; total: number; name: string } | null>(null);
   let syncError = $state('');
   let togglingId = $state<number | null>(null);
+  let authChecking = $state(false);
+  let authDiagnostics = $state<GithubAuthDiagnostics | null>(null);
+  let authError = $state('');
+  let agentProfiles = $state<AgentProfile[]>([]);
+  let newAgentName = $state('');
+  let agentError = $state('');
+  let savingAgentId = $state<number | null>(null);
+  let adoChecking = $state(false);
+  let adoPreviewData = $state<AdoPreview | null>(null);
+  let adoError = $state('');
+
+  // Theme panel state
+  let theme = $state<ThemeSettings>(loadThemeSettings());
+  let themeDrafts = $state<Partial<Record<ThemeKey, string>>>({ ...theme });
+
+  function syncThemeDrafts() {
+    themeDrafts = { ...theme };
+  }
+
+  function handleThemeColorChange(key: ThemeKey, value: string) {
+    themeDrafts = { ...themeDrafts, [key]: value };
+    const { theme: next, normalized } = setThemeColor(theme, key, value);
+    theme = next;
+    themeDrafts = { ...themeDrafts, [key]: normalized };
+  }
+
+  function commitThemeDraft(key: ThemeKey) {
+    const draft = themeDrafts[key] ?? theme[key];
+    const { theme: next, normalized } = setThemeColor(theme, key, draft);
+    theme = next;
+    themeDrafts = { ...themeDrafts, [key]: normalized };
+  }
+
+  function handleThemeKeyDown(e: KeyboardEvent, key: ThemeKey) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitThemeDraft(key);
+    }
+  }
+
+  function handleThemeReset() {
+    theme = resetThemeSettings();
+    syncThemeDrafts();
+  }
 
   let filteredRepos = $derived(
     $repos.filter((r) => r.name.toLowerCase().includes(repoFilter.toLowerCase()))
@@ -35,6 +108,7 @@
         settings = await getSettings();
         await refreshOrgs();
         if ($activeOrg) await refreshRepos($activeOrg);
+        agentProfiles = await listAgentProfiles();
       } catch (e: any) {
         error = e.message;
       }
@@ -121,6 +195,65 @@
   function disableAll() {
     filteredRepos.forEach((r) => { if (r.enabled) toggleRepo(r.id, false); });
   }
+
+  async function runAuthCheck() {
+    authChecking = true;
+    authError = '';
+    try {
+      authDiagnostics = await diagnoseGithubAuth($activeOrg ?? undefined);
+    } catch (e: any) {
+      authError = e.message;
+    } finally {
+      authChecking = false;
+    }
+  }
+
+  async function addAgentProfile() {
+    if (!newAgentName.trim()) return;
+    agentError = '';
+    try {
+      await createAgentProfile(newAgentName.trim());
+      agentProfiles = await listAgentProfiles();
+      newAgentName = '';
+    } catch (e: any) {
+      agentError = e.message ?? String(e);
+    }
+  }
+
+  async function persistAgentProfile(profile: AgentProfile) {
+    savingAgentId = profile.id;
+    agentError = '';
+    try {
+      await saveAgentProfile(profile);
+      agentProfiles = await listAgentProfiles();
+    } catch (e: any) {
+      agentError = e.message ?? String(e);
+    } finally {
+      savingAgentId = null;
+    }
+  }
+
+  async function removeAgentProfile(profileId: number) {
+    agentError = '';
+    try {
+      await deleteAgentProfile(profileId);
+      agentProfiles = await listAgentProfiles();
+    } catch (e: any) {
+      agentError = e.message ?? String(e);
+    }
+  }
+
+  async function runAdoPreview() {
+    adoChecking = true;
+    adoError = '';
+    try {
+      adoPreviewData = await adoPreview();
+    } catch (e: any) {
+      adoError = e.message ?? String(e);
+    } finally {
+      adoChecking = false;
+    }
+  }
 </script>
 
 <h1 style="margin-bottom:1.5rem">Settings</h1>
@@ -128,6 +261,40 @@
 {#if error}
   <div class="error-msg" style="margin-bottom:1rem">{error}</div>
 {/if}
+
+<section class="card theme-panel">
+  <div class="theme-panel-header">
+    <div>
+      <h2>Theme</h2>
+      <p class="hint">Hex colors are applied live and saved per browser. Headings and body use IBM Plex Sans; code uses IBM Plex Mono.</p>
+    </div>
+    <button class="btn-secondary" type="button" onclick={handleThemeReset}>Reset theme</button>
+  </div>
+  <div class="theme-grid">
+    {#each THEME_FIELDS as field}
+      <div class="theme-field">
+        <label class="settings-label" for={`theme-${field.key}`}>{field.label}</label>
+        <div class="theme-color-row">
+          <input
+            id={`theme-${field.key}`}
+            type="color"
+            class="theme-color-picker"
+            value={theme[field.key]}
+            oninput={(e) => handleThemeColorChange(field.key, (e.currentTarget as HTMLInputElement).value)}
+          />
+          <input
+            type="text"
+            class="theme-color-value mono"
+            value={themeDrafts[field.key] ?? theme[field.key]}
+            oninput={(e) => { themeDrafts = { ...themeDrafts, [field.key]: (e.currentTarget as HTMLInputElement).value }; }}
+            onblur={() => commitThemeDraft(field.key)}
+            onkeydown={(e) => handleThemeKeyDown(e, field.key)}
+          />
+        </div>
+      </div>
+    {/each}
+  </div>
+</section>
 
 <div class="settings-grid">
   <!-- GitHub token -->
@@ -137,8 +304,43 @@
       <label for="token">Personal Access Token</label>
       <input id="token" type="password" bind:value={settings.github_token}
         placeholder="ghp_…" autocomplete="off" />
-      <p class="hint">Needs <code>repo</code> scope to read private repos and Gemfiles.</p>
+      <p class="hint">Needs repo access for the org, and if the org enforces SSO the token must be explicitly authorized there.</p>
     </div>
+    <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+      <button class="btn-secondary" onclick={runAuthCheck} disabled={authChecking}>
+        {authChecking ? 'Checking…' : 'Run auth check'}
+      </button>
+      {#if authDiagnostics?.org}
+        <span class="text-muted" style="font-size:0.75rem">Target org: {authDiagnostics.org}</span>
+      {/if}
+    </div>
+    {#if authError}
+      <div class="error-msg" style="margin-top:0.75rem">{authError}</div>
+    {/if}
+    {#if authDiagnostics}
+      <div class="auth-results">
+        <div class="auth-row">
+          <div>
+            <strong>GitHub API</strong>
+            <p class="auth-message">{authDiagnostics.api.message}</p>
+            {#if authDiagnostics.api.hint}<p class="hint" style="margin-top:0.35rem">{authDiagnostics.api.hint}</p>{/if}
+          </div>
+          <span class="badge {authDiagnostics.api.ok ? 'badge-green' : authDiagnostics.api.status === 'skipped' ? 'badge-gray' : 'badge-red'}">
+            {authDiagnostics.api.status}
+          </span>
+        </div>
+        <div class="auth-row">
+          <div>
+            <strong>Git HTTPS</strong>
+            <p class="auth-message">{authDiagnostics.git.message}</p>
+            {#if authDiagnostics.git.hint}<p class="hint" style="margin-top:0.35rem">{authDiagnostics.git.hint}</p>{/if}
+          </div>
+          <span class="badge {authDiagnostics.git.ok ? 'badge-green' : authDiagnostics.git.status === 'skipped' ? 'badge-gray' : 'badge-red'}">
+            {authDiagnostics.git.status}
+          </span>
+        </div>
+      </div>
+    {/if}
   </section>
 
   <!-- Clone path -->
@@ -149,6 +351,150 @@
       <input id="clone-root" type="text" bind:value={settings.clone_root}
         placeholder="/Users/you/repos" />
       <p class="hint">Repos will be cloned to <code>&lt;root&gt;/&lt;org&gt;/&lt;repo&gt;</code>.</p>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">TFS / ADO</h2>
+    <div class="form-group">
+      <label for="tfs-base-url">Base URL</label>
+      <input id="tfs-base-url" type="text" bind:value={settings.tfs_base_url}
+        placeholder="https://tfs.internal.example.com/tfs" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-collection">Collection or org</label>
+      <input id="tfs-collection" type="text" bind:value={settings.tfs_collection}
+        placeholder="DefaultCollection" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-default-project">Default project</label>
+      <input id="tfs-default-project" type="text" bind:value={settings.tfs_default_project}
+        placeholder="Consumer Soutions" />
+    </div>
+    <div class="form-group">
+      <label for="tfs-default-area">Default area path</label>
+      <input id="tfs-default-area" type="text" bind:value={settings.tfs_default_area_path}
+        placeholder="MKT-Websites" />
+    </div>
+    <div class="form-group" style="margin-bottom:0">
+      <label for="tfs-pat">PAT / access token</label>
+      <input id="tfs-pat" type="password" bind:value={settings.tfs_pat}
+        placeholder="TFS token" autocomplete="off" />
+      <p class="hint">Defaults are used to scope read-only work item and release pulls. The preview below exercises the same ADO client the app will use for project ingestion.</p>
+    </div>
+    <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-top:1rem">
+      <button class="btn-secondary" onclick={runAdoPreview} disabled={adoChecking}>
+        {adoChecking ? 'Checking…' : 'Run ADO preview'}
+      </button>
+      {#if adoPreviewData}
+        <span class="text-muted" style="font-size:0.75rem">API version: {adoPreviewData.api_version}</span>
+      {/if}
+    </div>
+    {#if adoError}
+      <div class="error-msg" style="margin-top:0.75rem">{adoError}</div>
+    {/if}
+    {#if adoPreviewData}
+      <div class="auth-results" style="margin-top:0.75rem">
+        <div class="auth-row">
+          <div>
+            <strong>Preview scope</strong>
+            <p class="auth-message">{adoPreviewData.project} · {adoPreviewData.area_path}</p>
+          </div>
+          <span class="badge badge-green">{adoPreviewData.work_items.length} work items</span>
+        </div>
+      </div>
+      <pre class="config-sample" style="margin-top:0.75rem;max-height:22rem;overflow:auto"><code>{JSON.stringify(adoPreviewData, null, 2)}</code></pre>
+    {/if}
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">Confluence</h2>
+    <div class="form-group">
+      <label for="confluence-base-url">Base URL</label>
+      <input id="confluence-base-url" type="text" bind:value={settings.confluence_base_url}
+        placeholder="https://confluence.internal.example.com" />
+    </div>
+    <div class="form-group">
+      <label for="confluence-username">Username / email</label>
+      <input id="confluence-username" type="text" bind:value={settings.confluence_username}
+        placeholder="name@example.com" />
+    </div>
+    <div class="form-group" style="margin-bottom:0">
+      <label for="confluence-token">Token</label>
+      <input id="confluence-token" type="password" bind:value={settings.confluence_token}
+        placeholder="Confluence token" autocomplete="off" />
+      <p class="hint">Used by the app’s direct Confluence Cloud client for page lookup and search. External Claude/Codex workflows can use Atlassian’s official MCP server separately.</p>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">Microsoft 365</h2>
+    <div class="form-group">
+      <label for="microsoft-tenant-id">Tenant ID</label>
+      <input id="microsoft-tenant-id" type="text" bind:value={settings.microsoft_tenant_id}
+        placeholder="00000000-0000-0000-0000-000000000000" />
+    </div>
+    <div class="form-group">
+      <label for="microsoft-client-id">Client ID</label>
+      <input id="microsoft-client-id" type="text" bind:value={settings.microsoft_client_id}
+        placeholder="00000000-0000-0000-0000-000000000000" />
+    </div>
+    <div class="form-group" style="margin-bottom:0">
+      <label for="microsoft-client-secret">Client secret</label>
+      <input id="microsoft-client-secret" type="password" bind:value={settings.microsoft_client_secret}
+        placeholder="Microsoft Graph app secret" autocomplete="off" />
+      <p class="hint">Staged shared connector settings for Microsoft Teams and Microsoft Loop. No active data pulls yet.</p>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">Embedded Claude</h2>
+    <div class="form-group">
+      <label for="anthropic-api-key">Anthropic API key</label>
+      <input id="anthropic-api-key" type="password" bind:value={settings.anthropic_api_key}
+        placeholder="sk-ant-..." autocomplete="off" />
+    </div>
+    <div class="form-group">
+      <label for="anthropic-model">Model</label>
+      <input id="anthropic-model" bind:value={settings.anthropic_model}
+        placeholder="claude-sonnet-4-5" />
+    </div>
+    <div class="form-group" style="margin-bottom:0">
+      <label for="ai-system-prompt">Default system prompt</label>
+      <textarea id="ai-system-prompt" class="agent-textarea" bind:value={settings.ai_system_prompt} rows="4" placeholder="Focus on prioritization, blockers, missing context, and next checks."></textarea>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">MCP access</h2>
+    <label class="toggle-row" style="margin-bottom:0.75rem">
+      <input type="checkbox" bind:checked={settings.mcp_enabled} />
+      <span>Enable MCP access for this app</span>
+    </label>
+    <p class="hint" style="margin-bottom:1rem">This only controls whether you intend to expose the app to external MCP clients. The embedded aside does not use MCP.</p>
+
+    <div class="form-group">
+      <div class="sample-label">Claude Desktop sample</div>
+      <pre class="config-sample"><code>{`{
+  "mcpServers": {
+    "coverage-manager": {
+      "command": "cargo",
+      "args": ["run", "--manifest-path", "<path-to-coverage-manager>/mcp-server/Cargo.toml"]
+    }
+  }
+}`}</code></pre>
+    </div>
+
+    <div class="form-group" style="margin-bottom:0">
+      <div class="sample-label">Codex sample</div>
+      <pre class="config-sample"><code>{`{
+  "mcp_servers": {
+    "coverage-manager": {
+      "command": "cargo",
+      "args": ["run", "--manifest-path", "<path-to-coverage-manager>/mcp-server/Cargo.toml"]
+    }
+  }
+}`}</code></pre>
     </div>
   </section>
 
@@ -179,6 +525,73 @@
       <button class="btn-secondary" onclick={doAddOrg} disabled={addingOrg || !newOrg.trim()}>
         {addingOrg ? 'Adding…' : 'Add org'}
       </button>
+    </div>
+  </section>
+
+  <section class="card" style="padding:1.25rem">
+    <h2 style="margin-bottom:1rem">Agent profiles</h2>
+    {#if agentError}
+      <div class="error-msg" style="margin-bottom:0.75rem">{agentError}</div>
+    {/if}
+    <div class="add-org-row" style="margin-bottom:0.75rem">
+      <input type="text" bind:value={newAgentName} placeholder="Daily Focus"
+        onkeydown={(e) => e.key === 'Enter' && addAgentProfile()} style="flex:1" />
+      <button class="btn-secondary" onclick={addAgentProfile} disabled={!newAgentName.trim()}>
+        Add profile
+      </button>
+    </div>
+    <div class="agent-list">
+      {#each agentProfiles as profile}
+        <div class="agent-card">
+          <div class="agent-card-header">
+            <input bind:value={profile.name} />
+            <label class="toggle-row">
+              <input type="checkbox" bind:checked={profile.is_active} />
+              <span>Active</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for={`agent-goal-${profile.id}`}>Goal</label>
+            <input id={`agent-goal-${profile.id}`} bind:value={profile.goal} placeholder="Rank what needs my attention now." />
+          </div>
+          <div class="form-group">
+            <label for={`agent-instructions-${profile.id}`}>Instructions</label>
+            <textarea id={`agent-instructions-${profile.id}`} class="agent-textarea" bind:value={profile.instructions} rows="3" placeholder="Explain priorities, blockers, and missing context across sources."></textarea>
+          </div>
+          <div class="agent-grid">
+            <div class="form-group">
+              <label for={`agent-scope-${profile.id}`}>Scope</label>
+              <input id={`agent-scope-${profile.id}`} bind:value={profile.project_scope} placeholder="all_active_projects" />
+            </div>
+            <div class="form-group">
+              <label for={`agent-sources-${profile.id}`}>Source types</label>
+              <input id={`agent-sources-${profile.id}`} value={profile.source_types.join(', ')} oninput={(e) => { profile.source_types = (e.currentTarget as HTMLInputElement).value.split(',').map((v) => v.trim()).filter(Boolean); }} placeholder="github, docs, tfs, confluence, meetings" />
+            </div>
+            <div class="form-group">
+              <label for={`agent-manual-weight-${profile.id}`}>Manual priority weight</label>
+              <input id={`agent-manual-weight-${profile.id}`} type="number" bind:value={profile.weight_manual_priority} />
+            </div>
+            <div class="form-group">
+              <label for={`agent-release-weight-${profile.id}`}>Release risk weight</label>
+              <input id={`agent-release-weight-${profile.id}`} type="number" bind:value={profile.weight_release_risk} />
+            </div>
+            <div class="form-group">
+              <label for={`agent-doc-weight-${profile.id}`}>Doc gap weight</label>
+              <input id={`agent-doc-weight-${profile.id}`} type="number" bind:value={profile.weight_doc_gap} />
+            </div>
+            <div class="form-group">
+              <label for={`agent-meeting-weight-${profile.id}`}>Meeting follow-up weight</label>
+              <input id={`agent-meeting-weight-${profile.id}`} type="number" bind:value={profile.weight_meeting_followup} />
+            </div>
+          </div>
+          <div class="agent-actions">
+            <button class="btn-primary" onclick={() => persistAgentProfile(profile)} disabled={savingAgentId === profile.id}>
+              {savingAgentId === profile.id ? 'Saving…' : 'Save profile'}
+            </button>
+            <button class="btn-ghost btn-danger-ghost" onclick={() => removeAgentProfile(profile.id)}>Delete</button>
+          </div>
+        </div>
+      {/each}
     </div>
   </section>
 </div>
@@ -268,6 +681,45 @@
 </div>
 
 <style>
+  .theme-panel { padding: 1.25rem; margin-bottom: 1rem; }
+  .theme-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  .theme-panel-header h2 { margin-bottom: 0.25rem; }
+  .theme-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem 1rem;
+  }
+  .theme-field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .settings-label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .theme-color-row { display: flex; align-items: center; gap: 0.5rem; }
+  .theme-color-picker {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .theme-color-picker::-webkit-color-swatch-wrapper { padding: 2px; }
+  .theme-color-picker::-webkit-color-swatch { border: none; border-radius: 3px; }
+  .theme-color-value { flex: 1; font-size: 0.75rem; padding: 0.3rem 0.5rem; }
+
   .settings-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -275,13 +727,42 @@
     align-items: start;
   }
   .hint { font-size: 0.75rem; color: var(--text-muted); margin: 0.25rem 0 0; }
+  .auth-results { margin-top: 0.9rem; display: grid; gap: 0.75rem; }
+  .auth-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+  }
+  .auth-message { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--text-secondary); }
   code { font-family: var(--font-mono); background: var(--bg-muted); padding: 0.1em 0.3em; border-radius: 3px; }
   .org-list { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
   .org-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; }
   .org-name { flex: 1; font-size: 0.875rem; }
   .add-org-row { display: flex; gap: 0.5rem; }
+  .agent-list { display:grid; gap:0.75rem; }
+  .agent-card { border:1px solid var(--border); border-radius:var(--radius-sm); padding:0.75rem; background:var(--bg-subtle); }
+  .agent-card-header { display:flex; justify-content:space-between; gap:0.75rem; margin-bottom:0.75rem; }
+  .agent-grid { display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; }
+  .agent-actions { display:flex; gap:0.5rem; justify-content:flex-end; }
+  .agent-textarea { width:100%; resize:vertical; min-height:90px; padding:0.625rem; border:1px solid var(--border); border-radius:var(--radius-sm); font:inherit; }
+  .toggle-row { display:flex; align-items:center; gap:0.4rem; font-size:0.8125rem; white-space:nowrap; }
   .btn-danger-ghost { color: var(--text-muted); font-size: 0.75rem; }
   .btn-danger-ghost:hover { color: var(--danger); }
+  .sample-label { font-size: 0.8125rem; font-weight: 500; color: var(--text-secondary); }
+  .config-sample {
+    margin: 0.35rem 0 0;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #0f172a;
+    color: #e2e8f0;
+    overflow: auto;
+    font: 0.75rem/1.5 var(--font-mono);
+  }
 
   .repo-mgmt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
   .repo-controls { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.25rem; }

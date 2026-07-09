@@ -1,0 +1,458 @@
+use rusqlite::{Connection, OptionalExtension, params};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use crate::db::orchestrator_migrations;
+
+pub struct Store { conn: Mutex<Connection> }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionRow {
+    pub id: String,
+    pub label: Option<String>,
+    pub cwd: String,
+    pub pid: i64,
+    pub status: String,
+    pub current_tool: Option<String>,
+    pub last_progress: Option<String>,
+    pub last_user_prompt: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub ended_at: Option<i64>,
+    pub end_reason: Option<String>,
+    // NEW (Schema v2)
+    pub transcript_path: Option<String>,
+    pub artifact_kind: Option<String>,
+    pub artifact_id: Option<String>,
+    pub artifact_title: Option<String>,
+    pub artifact_url: Option<String>,
+    // NEW (Schema v3)
+    pub loaded_snapshot: Option<String>,
+    // NEW (Schema v4)
+    pub first_user_prompt: Option<String>,
+    pub dismissed_at: Option<i64>,
+}
+
+impl Store {
+    pub fn open_at(path: &Path) -> rusqlite::Result<Self> {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let conn = Connection::open(path)?;
+        orchestrator_migrations::migrate(&conn)?;
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    pub fn open_in_memory() -> rusqlite::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        orchestrator_migrations::migrate(&conn)?;
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    /// Run a blocking DB closure off the async runtime. Use this from axum handlers.
+    ///
+    /// Contract: a `JoinError` (DB closure panicked) is fatal — we panic the
+    /// handler thread so the failure is visible. Callers map the inner
+    /// `Result<_, rusqlite::Error>` returned by their own closure as usual.
+    pub async fn run<F, T>(store: Arc<Self>, f: F) -> T
+    where F: FnOnce(&Self) -> T + Send + 'static, T: Send + 'static
+    {
+        tokio::task::spawn_blocking(move || f(&store))
+            .await
+            .expect("orchestrator DB task panicked")
+    }
+
+    pub fn schema_version(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+    }
+
+    pub fn upsert_session_start(
+        &self, id: &str, label: Option<&str>, cwd: &str, pid: i64, now: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions(id,label,cwd,pid,status,started_at,updated_at)
+             VALUES(?,?,?,?, 'working', ?, ?)
+             ON CONFLICT(id) DO UPDATE SET label=excluded.label, cwd=excluded.cwd,
+                pid=excluded.pid, status='working', updated_at=excluded.updated_at,
+                ended_at=NULL, end_reason=NULL",
+            params![id, label, cwd, pid, now, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session(&self, id: &str) -> rusqlite::Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
+                    started_at,updated_at,ended_at,end_reason,
+                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url,
+                    loaded_snapshot,first_user_prompt,dismissed_at
+             FROM sessions WHERE id=?",
+            params![id],
+            |r| Ok(SessionRow {
+                id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
+                status: r.get(4)?, current_tool: r.get(5)?, last_progress: r.get(6)?,
+                last_user_prompt: r.get(7)?, started_at: r.get(8)?, updated_at: r.get(9)?,
+                ended_at: r.get(10)?, end_reason: r.get(11)?,
+                transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
+                artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
+                loaded_snapshot: r.get(17)?,
+                first_user_prompt: r.get(18)?, dismissed_at: r.get(19)?,
+            }),
+        ).optional()
+    }
+
+    pub fn enqueue_inbox(&self, sid: &str, from_kind: &str, from_id: Option<&str>,
+                        ts: i64, message: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO inbox(session_id,from_kind,from_id,ts,message) VALUES(?,?,?,?,?)",
+            params![sid, from_kind, from_id, ts, message])?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
+    pub fn record_event(&self, sid: &str, ts: i64, kind: &str, payload: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO events(session_id,ts,kind,payload) VALUES(?,?,?,?)",
+            params![sid, ts, kind, payload])?;
+        Ok(conn.last_insert_rowid())
+    }
+    pub fn apply_status(&self, sid: &str, new_status: &str, now: i64,
+                        ended: Option<(i64, &str)>) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        match ended {
+            Some((ended_at, reason)) => conn.execute(
+                "UPDATE sessions SET status=?, updated_at=?, ended_at=?, end_reason=? WHERE id=?",
+                params![new_status, now, ended_at, reason, sid])?,
+            None => conn.execute(
+                "UPDATE sessions SET status=?, updated_at=? WHERE id=?",
+                params![new_status, now, sid])?,
+        };
+        Ok(())
+    }
+    pub fn set_current_tool(&self, sid: &str, tool: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE sessions SET current_tool=?, updated_at=? WHERE id=?",
+            params![tool, now, sid])?;
+        Ok(())
+    }
+    pub fn set_last_user_prompt(&self, sid: &str, prompt: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE sessions SET last_user_prompt=?, updated_at=? WHERE id=?",
+            params![prompt, now, sid])?;
+        Ok(())
+    }
+    pub fn set_transcript_path(&self, sid: &str, path: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET transcript_path=?, updated_at=? WHERE id=?",
+            params![path, now, sid])?;
+        Ok(())
+    }
+    pub fn set_loaded_snapshot(&self, sid: &str, snapshot: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET loaded_snapshot=?, updated_at=? WHERE id=?",
+            params![snapshot, now, sid])?;
+        Ok(())
+    }
+
+    pub fn set_first_user_prompt_if_null(&self, sid: &str, prompt: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET first_user_prompt = ?, updated_at = ?
+             WHERE id = ? AND first_user_prompt IS NULL",
+            params![prompt, now, sid])?;
+        Ok(())
+    }
+
+    pub fn set_dismissed_at(&self, sid: &str, value: Option<i64>, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET dismissed_at = ?, updated_at = ? WHERE id = ?",
+            params![value, now, sid])?;
+        Ok(())
+    }
+
+    pub fn link_artifact(&self, sid: &str, kind: &str, id: &str,
+                          title: Option<&str>, url: Option<&str>, now: i64)
+        -> rusqlite::Result<()>
+    {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET artifact_kind=?, artifact_id=?, artifact_title=?, artifact_url=?, updated_at=?
+             WHERE id=?",
+            params![kind, id, title, url, now, sid])?;
+        Ok(())
+    }
+
+    pub fn unlink_artifact(&self, sid: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET artifact_kind=NULL, artifact_id=NULL, artifact_title=NULL, artifact_url=NULL, updated_at=?
+             WHERE id=?",
+            params![now, sid])?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ArtifactRow {
+    pub id: i64, pub session_id: String, pub ts: i64,
+    pub path: String, pub label: Option<String>, pub kind: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct InboxRow {
+    pub id: i64, pub from_kind: String, pub from_id: Option<String>,
+    pub ts: i64, pub message: String,
+}
+
+impl Store {
+    pub fn set_last_progress(&self, sid: &str, summary: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE sessions SET last_progress=?, updated_at=? WHERE id=?",
+            params![summary, now, sid])?;
+        Ok(())
+    }
+    pub fn insert_artifact(&self, sid: &str, ts: i64, path: &str, label: Option<&str>)
+        -> rusqlite::Result<i64> {
+        let kind = if path.contains("/pull/") || path.contains("/pulls/") { "pr" }
+                   else if path.starts_with("http") { "url" } else { "file" };
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO artifacts(session_id,ts,path,label,kind) VALUES(?,?,?,?,?)",
+            params![sid, ts, path, label, kind])?;
+        Ok(conn.last_insert_rowid())
+    }
+    pub fn list_artifacts(&self, sid: &str) -> rusqlite::Result<Vec<ArtifactRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,session_id,ts,path,label,kind FROM artifacts
+             WHERE session_id=? ORDER BY ts DESC")?;
+        let rows: rusqlite::Result<Vec<ArtifactRow>> = stmt.query_map(params![sid], |r| Ok(ArtifactRow {
+            id: r.get(0)?, session_id: r.get(1)?, ts: r.get(2)?,
+            path: r.get(3)?, label: r.get(4)?, kind: r.get(5)?,
+        }))?.collect();
+        rows
+    }
+    pub fn list_sessions(&self) -> rusqlite::Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,label,cwd,pid,status,current_tool,last_progress,last_user_prompt,
+                    started_at,updated_at,ended_at,end_reason,
+                    transcript_path,artifact_kind,artifact_id,artifact_title,artifact_url,
+                    loaded_snapshot,first_user_prompt,dismissed_at
+             FROM sessions ORDER BY updated_at DESC")?;
+        let rows: Vec<SessionRow> = stmt.query_map([], |r| Ok(SessionRow {
+            id: r.get(0)?, label: r.get(1)?, cwd: r.get(2)?, pid: r.get(3)?,
+            status: r.get(4)?, current_tool: r.get(5)?, last_progress: r.get(6)?,
+            last_user_prompt: r.get(7)?, started_at: r.get(8)?, updated_at: r.get(9)?,
+            ended_at: r.get(10)?, end_reason: r.get(11)?,
+            transcript_path: r.get(12)?, artifact_kind: r.get(13)?,
+            artifact_id: r.get(14)?, artifact_title: r.get(15)?, artifact_url: r.get(16)?,
+            loaded_snapshot: r.get(17)?,
+            first_user_prompt: r.get(18)?, dismissed_at: r.get(19)?,
+        }))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+    pub fn events_for(&self, sid: &str, limit: i64)
+        -> rusqlite::Result<Vec<(i64,i64,String,String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,ts,kind,payload FROM events WHERE session_id=?
+             ORDER BY ts DESC LIMIT ?")?;
+        let rows: Vec<(i64,i64,String,String)> = stmt.query_map(params![sid, limit], |r|
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+    pub fn find_session_by_pid(&self, pid: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id FROM sessions WHERE pid=? AND ended_at IS NULL
+             ORDER BY started_at DESC LIMIT 1",
+            params![pid], |r| r.get::<_, String>(0)).optional()
+    }
+    /// Returns pending inbox messages WITHOUT marking delivered.
+    pub fn peek_inbox(&self, sid: &str) -> rusqlite::Result<Vec<InboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id,from_kind,from_id,ts,message FROM inbox
+             WHERE session_id=? AND delivered_at IS NULL ORDER BY ts ASC")?;
+        let rows: Vec<InboxRow> = stmt.query_map(params![sid], |r| Ok(InboxRow {
+            id: r.get(0)?, from_kind: r.get(1)?, from_id: r.get(2)?,
+            ts: r.get(3)?, message: r.get(4)?,
+        }))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+
+    /// Mark the given inbox IDs as delivered. Idempotent — unknown/already-delivered IDs are no-ops.
+    pub fn ack_inbox(&self, sid: &str, ids: &[i64], now: i64) -> rusqlite::Result<usize> {
+        if ids.is_empty() { return Ok(0); }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "UPDATE inbox SET delivered_at=? WHERE session_id=? AND id IN ({}) AND delivered_at IS NULL",
+            placeholders);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Integer(now),
+            rusqlite::types::Value::Text(sid.to_string()),
+        ];
+        for id in ids {
+            params_vec.push(rusqlite::types::Value::Integer(*id));
+        }
+        let n = stmt.execute(rusqlite::params_from_iter(params_vec.iter()))?;
+        Ok(n)
+    }
+
+    pub fn drain_inbox(&self, sid: &str, now: i64) -> rusqlite::Result<Vec<InboxRow>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let rows: Vec<InboxRow> = {
+            let mut stmt = tx.prepare(
+                "SELECT id,from_kind,from_id,ts,message FROM inbox
+                 WHERE session_id=? AND delivered_at IS NULL ORDER BY ts ASC")?;
+            let collected: Result<Vec<InboxRow>, rusqlite::Error> = stmt.query_map(params![sid], |r| Ok(InboxRow {
+                id: r.get(0)?, from_kind: r.get(1)?, from_id: r.get(2)?,
+                ts: r.get(3)?, message: r.get(4)?,
+            }))?.collect();
+            collected?
+        };
+        tx.execute("UPDATE inbox SET delivered_at=? WHERE session_id=? AND delivered_at IS NULL",
+            params![now, sid])?;
+        tx.commit()?;
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn mem_store() -> Arc<Store> {
+        Arc::new(Store::open_in_memory().expect("open in-memory store"))
+    }
+
+    #[test]
+    fn upsert_then_get_round_trips() {
+        let store = mem_store();
+        store.upsert_session_start("sess-1", Some("feature"), "/tmp/x", 42, 1).unwrap();
+        let row = store.get_session("sess-1").unwrap().expect("row");
+        assert_eq!(row.id, "sess-1");
+        assert_eq!(row.status, "working");
+    }
+
+    #[test]
+    fn schema_version_is_four() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), 4);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_preserves_existing_rows() {
+        use rusqlite::Connection;
+        use crate::db::orchestrator_migrations;
+
+        // Build a v1 DB by hand (mimic the state before this migration ran).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                label TEXT, cwd TEXT NOT NULL, pid INTEGER NOT NULL,
+                status TEXT NOT NULL, current_tool TEXT, last_progress TEXT,
+                last_user_prompt TEXT, started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT
+             );
+             INSERT INTO schema_version(version) VALUES (1);
+             INSERT INTO sessions(id,label,cwd,pid,status,started_at,updated_at)
+                  VALUES ('existing', 'before-migration', '/tmp/old', 999, 'working', 100, 100);"
+        ).unwrap();
+
+        // Run the migration — should bring v1 → v3 without losing the row.
+        orchestrator_migrations::migrate(&conn).unwrap();
+
+        let row: (String, Option<String>, Option<String>, Option<String>) = conn.query_row(
+            "SELECT id, transcript_path, artifact_kind, artifact_title FROM sessions WHERE id='existing'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!(row.0, "existing");
+        assert!(row.1.is_none());
+        assert!(row.2.is_none());
+        assert!(row.3.is_none());
+
+        // schema_version row should reflect v4 (the current schema version).
+        let v: i64 = conn.query_row(
+            "SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 4);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_is_idempotent() {
+        use crate::db::orchestrator_migrations;
+        let store = Store::open_in_memory().unwrap();
+        // Re-running migrate on an already-migrated v2 connection must not error.
+        let conn = store.lock_conn();
+        orchestrator_migrations::migrate(&conn).unwrap();
+        orchestrator_migrations::migrate(&conn).unwrap();
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced() {
+        let store = mem_store();
+        let err = store.enqueue_inbox("missing", "human", None, 1, "x").unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("foreign key") || msg.contains("constraint"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn run_async_executes_off_runtime() {
+        let store = mem_store();
+        store.upsert_session_start("s1", None, "/", 1, 1).unwrap();
+        let s = store.clone();
+        let row = Store::run(s, |st| st.get_session("s1")).await.unwrap().unwrap();
+        assert_eq!(row.id, "s1");
+    }
+
+    #[test]
+    fn loaded_snapshot_persists_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_loaded_snapshot("s1", r#"{"plugins":["a"]}"#, 2).unwrap();
+        let row = s.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.loaded_snapshot.as_deref(), Some(r#"{"plugins":["a"]}"#));
+    }
+
+    #[test]
+    fn first_user_prompt_persists_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_first_user_prompt_if_null("s1", "hello world", 2).unwrap();
+        let row = s.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.first_user_prompt.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn first_user_prompt_is_write_once() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_first_user_prompt_if_null("s1", "initial", 2).unwrap();
+        s.set_first_user_prompt_if_null("s1", "second attempt", 3).unwrap();
+        let row = s.get_session("s1").unwrap().unwrap();
+        assert_eq!(row.first_user_prompt.as_deref(), Some("initial"),
+            "set_first_user_prompt_if_null must not overwrite an existing value");
+    }
+
+    #[test]
+    fn dismissed_at_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_session_start("s1", None, "/tmp", 1, 1).unwrap();
+        s.set_dismissed_at("s1", Some(42), 2).unwrap();
+        assert_eq!(s.get_session("s1").unwrap().unwrap().dismissed_at, Some(42));
+        s.set_dismissed_at("s1", None, 3).unwrap();
+        assert!(s.get_session("s1").unwrap().unwrap().dismissed_at.is_none());
+    }
+}

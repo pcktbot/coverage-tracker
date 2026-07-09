@@ -1,0 +1,10 @@
+{
+  "_README": "Merge into ~/.claude/settings.json. Replace COVERAGE_MANAGER_REPO with the absolute repo path. Append to existing hooks.<Event> arrays rather than overwriting.",
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "COVERAGE_MANAGER_REPO/scripts/hooks/session-start.sh" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "COVERAGE_MANAGER_REPO/scripts/hooks/user-prompt-submit.sh" }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "COVERAGE_MANAGER_REPO/scripts/hooks/pre-tool-use.sh" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "COVERAGE_MANAGER_REPO/scripts/hooks/notification.sh" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "COVERAGE_MANAGER_REPO/scripts/hooks/stop.sh" }] }]
+  }
+}
